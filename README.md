@@ -33,7 +33,7 @@ A synthesizable SystemVerilog implementation of a **Transformer Decoder block** 
                     └──────────────────────────────────────────┘
 ```
 
-This is a **pre-norm** decoder architecture (GPT-2/LLaMA style) implementing autoregressive inference with BRAM-backed weights, KV-cache, and division-free softmax via reciprocal LUT.
+This is a **pre-norm** decoder architecture (GPT-2/LLaMA style) implementing autoregressive inference with BRAM-backed weights, KV-cache, division-free softmax and LayerNorm via reciprocal LUT + Newton-Raphson.
 
 ## Key Parameters
 
@@ -233,7 +233,8 @@ All computation uses **Q8.8 signed fixed-point** (16-bit) with 32-bit accumulato
 | Addition | Saturating (clamps to representable range) |
 | Softmax exp | 4-segment piecewise-linear over [−8, 0] |
 | Softmax 1/Σ | 32-entry reciprocal LUT + Newton-Raphson |
-| LayerNorm 1/√x | 4-entry LUT in transformer_pkg |
+| LayerNorm ÷N | Arithmetic right-shift (N is power of 2) |
+| LayerNorm 1/√x | 32-entry rsqrt LUT + Newton-Raphson |
 
 ## Project Structure
 
@@ -309,7 +310,7 @@ The softmax tests validate the reciprocal-LUT normalisation matches exact divisi
 python3 scripts/lint_check.py
 ```
 
-Validates all 13 RTL files: module balance, package imports, reset patterns, instantiation resolution. Reports 0 errors, 5 warnings (BRAM blocks intentionally lack reset in their memory `always_ff` — standard practice for inference to FPGA BRAM primitives).
+Validates all 17 RTL files: module balance, package imports, reset patterns, instantiation resolution. Reports 0 errors, 5 warnings (BRAM blocks intentionally lack reset in their memory `always_ff` — standard practice for inference to FPGA BRAM primitives).
 
 ### RTL Simulation (iverilog)
 
@@ -377,7 +378,7 @@ make -f Makefile.softmax   # Softmax
 Integer-only datapaths eliminate floating-point units, reducing area and power. Q8.8 keeps multipliers at 16×16 bits — ideal for FPGA DSP48 blocks.
 
 ### Why Reciprocal LUT Instead of Division?
-Hardware dividers are either non-synthesizable (Verilog `/`) or require multi-cycle iterative circuits. The 32-entry LUT + one Newton-Raphson iteration computes the reciprocal in a single cycle using only a small ROM, two multipliers, and a shifter. Accuracy is ±1 LSB, matching the Q8.8 output precision.
+Hardware dividers are either non-synthesizable (Verilog `/`) or require multi-cycle iterative circuits. Both the softmax normalisation (1/Σexp) and the LayerNorm inverse square root (1/√var) use the same architectural pattern: a 32-entry LUT indexed by CLZ-normalised mantissa bits, followed by one Newton-Raphson refinement iteration. Each computes in a single cycle using only a small ROM, two multipliers, and a barrel shifter. The LayerNorm mean/variance divisions by VEC_LEN use arithmetic right-shift since VEC_LEN is a power of 2. No runtime division operators remain in the compute datapath.
 
 ### Why BRAM for Weights?
 Combinational array ports (the original design) are fine for simulation but synthesise to massive LUT-based register files. BRAM storage reduces this from ~800K flip-flops to ~100 KB of block RAM (a fraction of even a small FPGA). The `INIT_FILE` parameter enables preloading from hex files at synthesis.
@@ -784,7 +785,7 @@ The partition controller checks whether the current device holds the final layer
 | Processing Element | 1 | ~30 | ~20 | — |
 | 4×4 Systolic Array | 16 | ~500 | ~350 | — |
 | Softmax Unit (VEC_LEN=128) | 2 | ~2K | ~3K | — |
-| Layer Normalisation | 2–4 | ~300 | ~500 | — |
+| Layer Normalisation | 4–6 | ~400 | ~600 | — |
 | Multi-Head Attention | ~64 | ~5K | ~8K | — |
 | Feed-Forward Network | ~64 | ~3K | ~5K | — |
 | Weight BRAMs (12 instances) | — | — | — | ~110 |

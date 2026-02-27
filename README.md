@@ -531,6 +531,187 @@ Once layer 0 finishes token t and passes its output to layer 1, layer 0 can imme
 
 **Language model head.** After all N decoder layers, the output embedding is projected to vocabulary logits via a large matrix multiply (D_MODEL × VOCAB_SIZE). This is a single linear layer with no bias, often sharing weights with the input embedding table. For D_MODEL=64, VOCAB_SIZE=256: 16K parameters, fitting in one additional BRAM.
 
+## Multi-Device Distributed Inference
+
+When a model exceeds the capacity of a single FPGA (or ASIC), it must be partitioned across multiple physical devices connected by high-speed serial links. This section covers the partitioning strategies, interconnect requirements, and protocol design for distributing this decoder across multiple chips.
+
+### Why Multi-Device?
+
+A single decoder layer at D_MODEL=64 fits comfortably on one mid-range FPGA (~126 BRAM18K, ~150 DSP48). But scaling to production dimensions changes the picture dramatically:
+
+| Model | Layers | D_MODEL | Params/layer | Total params | BRAM18K/layer |
+|-------|--------|---------|-------------|-------------|---------------|
+| This design | 1 | 64 | 49K | 49K | ~126 |
+| GPT-2 Small | 12 | 768 | 7M | 85M | ~19K |
+| LLaMA-7B | 32 | 4096 | 202M | 6.5B | ~550K |
+| LLaMA-70B | 80 | 8192 | 805M | 64.5B | ~2.2M |
+
+Even GPT-2 Small exceeds the largest single FPGA. Multi-device partitioning is unavoidable for any production-scale model.
+
+### Partitioning Strategies
+
+#### Pipeline Parallelism (Layer-Wise Split)
+
+Assign consecutive layers to different devices. Each device holds a subset of the model's depth.
+
+```
+          High-speed serial link        High-speed serial link
+Device 0 ◄────────────────────► Device 1 ◄────────────────────► Device 2
+┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
+│ Layers 0–3       │    │ Layers 4–7       │    │ Layers 8–11      │
+│ + KV-cache 0–3   │    │ + KV-cache 4–7   │    │ + KV-cache 8–11  │
+│ + Embedding table │    │                  │    │ + LM Head        │
+└──────────────────┘    └──────────────────┘    └──────────────────┘
+        │                       ▲ │                      ▲
+        └───── emb vector ──────┘ └──── emb vector ──────┘
+             (D_MODEL words)           (D_MODEL words)
+```
+
+**Inter-device traffic.** After each device completes its layers, it sends a single embedding vector (D_MODEL elements × 16 bits) to the next device. For D_MODEL=64: 128 bytes per token per hop. For D_MODEL=4096 (LLaMA-7B): 8 KB per token per hop.
+
+**Latency analysis.** The critical path is the sequential pipeline: Device 0 processes layers 0–3, sends embedding to Device 1, which processes layers 4–7, and so on. The inter-device transfer adds link latency at each hop. With K devices and N total layers:
+
+    Total latency = K × (N/K × layer_compute) + (K-1) × link_latency
+                  = N × layer_compute + (K-1) × link_latency
+
+The compute time is unchanged — pipeline parallelism doesn't reduce single-token latency. It only helps by fitting a larger model than one device can hold. The link hops add pure overhead.
+
+**Link bandwidth requirement.** Modest. One embedding vector per token per hop. At 100 MHz compute clock and ~3,200 cycles per layer, a 4-layer partition produces one embedding every ~12,800 cycles = ~128 μs. Transferring 128 bytes in 128 μs requires only 1 MB/s — trivial for any modern serial link. Even at D_MODEL=4096, the requirement is ~62 MB/s, well within a single GTH transceiver lane.
+
+**Bubble problem.** During single-sequence autoregressive decode, only one device is active at a time — the others idle while waiting for their input. Device utilisation is 1/K. This can be mitigated by processing multiple independent sequences (micro-batching): while Device 1 processes sequence A's layers 4–7, Device 0 processes sequence B's layers 0–3.
+
+**Mapping from this design.** Each device instantiates `transformer_decoder_top` (Strategy 1 or 3 from the multi-layer section) for its assigned layers. A thin TX/RX wrapper serialises/deserialises the `out_emb` vector onto the link. The `start`/`valid` handshake extends across the link as flow control signals.
+
+#### Tensor Parallelism (Intra-Layer Split)
+
+Split each layer's computation across devices. Each device holds a slice of every weight matrix.
+
+```
+                    High-speed serial link (all-reduce)
+              ┌────────────────────────────────────────────┐
+              │                                            │
+    Device 0  │                                  Device 1  │
+┌─────────────┴───────┐              ┌─────────────────────┴┐
+│ All layers           │              │ All layers            │
+│ Wq[:,0:D/2]          │              │ Wq[:,D/2:D]           │
+│ Wk[:,0:D/2]          │              │ Wk[:,D/2:D]           │
+│ Heads 0–1            │              │ Heads 2–3             │
+│ FFN W1[:,0:D_FF/2]   │              │ FFN W1[:,D_FF/2:D_FF] │
+└──────────────────────┘              └───────────────────────┘
+         │                                      │
+         └──────── partial sums ────────────────┘
+                   (all-reduce)
+```
+
+**How it works.** For attention: each device computes a subset of attention heads (e.g., 2 heads each on 2 devices). The per-head outputs are concatenated across devices before the output projection. For FFN: each device computes a slice of the hidden dimension. Partial results are summed via an all-reduce operation.
+
+**Inter-device traffic.** Much higher than pipeline parallelism. Every layer requires one or more all-reduce operations across all devices. Each all-reduce exchanges D_MODEL × 16-bit partial sums. For a ring all-reduce with K devices, each device sends and receives (K-1)/K × D_MODEL × 2 bytes per all-reduce. With two all-reduces per layer (attention output + FFN output) and N layers:
+
+    Bytes per token = 2 × N × 2 × (K-1)/K × D_MODEL × 2
+
+For 12 layers, D_MODEL=4096, K=4: ~384 KB per token. At 3,200 cycles per layer (~384 μs): effective bandwidth requirement ~1 GB/s per link — still feasible with multi-lane GTH/GTY transceivers, but a meaningful design constraint.
+
+**Advantage.** Reduces memory per device proportionally to K. Each device holds 1/K of the weight matrices. Critically, it reduces single-token latency for memory-bandwidth-bound operations since each device processes fewer parameters.
+
+**Mapping from this design.** The attention module's head loop would be split across devices, each computing N_HEADS/K heads. A new all-reduce module would sum partial output-projection results. The FFN would similarly split the D_FF dimension. The systolic array's tile size naturally supports this partitioning.
+
+#### Hybrid Pipeline + Tensor Parallelism
+
+Production systems (Megatron-LM, DeepSpeed) combine both:
+
+```
+            TP group 0              TP group 1
+         (tensor parallel)       (tensor parallel)
+    ┌────────┬────────┐     ┌────────┬────────┐
+    │ Dev 0  │ Dev 1  │     │ Dev 2  │ Dev 3  │
+    │ L0–5   │ L0–5   │────►│ L6–11  │ L6–11  │
+    │ heads  │ heads  │     │ heads  │ heads  │
+    │ 0–1    │ 2–3    │     │ 0–1    │ 2–3    │
+    └────────┴────────┘     └────────┴────────┘
+     ◄── all-reduce ──►     ◄── all-reduce ──►
+       (high bandwidth)       (high bandwidth)
+              │                       ▲
+              └── pipeline hop ───────┘
+                 (low bandwidth)
+```
+
+Tensor parallelism within a group of tightly-connected devices (high-bandwidth links), pipeline parallelism between groups (lower-bandwidth links). This matches the physical topology of multi-FPGA systems where devices on the same board share high-speed traces, while inter-board links are more constrained.
+
+### High-Speed Serial Link Options
+
+| Link Technology | Raw Rate (per lane) | Typical FPGA | Latency | Notes |
+|----------------|-------------------|-------------|---------|-------|
+| Xilinx Aurora (GTH) | 12.5–16.3 Gbps | Kintex/Virtex US+ | ~100–200 ns | Point-to-point, low overhead |
+| Xilinx Aurora (GTY) | 25–32.75 Gbps | Virtex US+ / Versal | ~100–200 ns | Higher-end FPGAs |
+| Intel Stratix TX | 17.4–28.3 Gbps | Stratix 10 | ~100–200 ns | Intel ecosystem |
+| PCIe Gen4 ×16 | 256 Gbps aggregate | Most FPGAs | ~1–2 μs | Standard, higher latency |
+| CXL 2.0 | 256 Gbps (×16) | Versal/Agilex | ~200–400 ns | Cache-coherent, emerging |
+| Custom LVDS | 1–3 Gbps | Any FPGA | ~10–50 ns | Lowest latency, low bandwidth |
+| Chip-to-chip die link | 100+ Gbps | ASIC / chiplet | ~1–5 ns | For custom silicon / chiplets |
+
+**Bandwidth calculation example.** Pipeline parallelism with D_MODEL=4096: 8 KB per hop. At one hop every 128 μs (4 layers at 100 MHz), the requirement is 62 MB/s = 0.5 Gbps. A single GTH lane at 12.5 Gbps provides 25× headroom. Tensor parallelism at D_MODEL=4096 with 12 layers: ~1 GB/s = 8 Gbps. One GTH lane still suffices, but with only ~1.5× margin — a dual-lane Aurora link would be prudent.
+
+### Protocol Design
+
+The inter-device protocol needs to handle three concerns:
+
+**Embedding transfer.** A simple streaming protocol: header (layer index, sequence position, token ID) followed by D_MODEL data words. With packed array ports, the embedding is already a contiguous bit vector that maps directly to a serial frame. At D_MODEL=64, the entire payload is 128 bytes — a single Aurora frame with minimal framing overhead.
+
+**Flow control.** The producing device asserts `valid` when its embedding is ready; the consuming device asserts `ready` when it can accept data. This maps naturally to AXI-Stream (TVALID/TREADY), which Aurora supports natively. Back-pressure propagates automatically: if a downstream device stalls, the upstream device holds its output.
+
+**Synchronisation.** Each device maintains its own clock domain. The serial transceiver handles clock domain crossing internally. A small elastic FIFO (8–16 entries) at the receiver absorbs jitter. The `start`/`valid` handshake protocol already tolerates arbitrary delays, so no lockstep synchronisation is required — devices can run at different clock frequencies.
+
+**All-reduce (for tensor parallelism).** A ring all-reduce requires each device to simultaneously send a partial sum to its neighbour and receive a partial sum from the other direction. This needs bidirectional links and a reduce-scatter / all-gather FSM. For K=2 devices, a simple exchange-and-add suffices:
+
+```
+Device 0 sends partial_sum_0 ──► Device 1 computes partial_sum_0 + partial_sum_1
+Device 1 sends partial_sum_1 ──► Device 0 computes partial_sum_0 + partial_sum_1
+```
+
+For K>2, a ring topology with log₂(K) reduce phases is standard.
+
+### RTL Implementation Sketch
+
+Extending this design for multi-device operation requires three new modules:
+
+**link_tx** — Serialises the D_MODEL-wide `out_emb` packed vector into a stream of N-bit words matching the transceiver width (e.g., 64-bit for Aurora). Appends a header with layer index and sequence position. Drives an AXI-Stream interface to the Aurora IP.
+
+**link_rx** — Receives the serial stream, strips the header, and deserialises into a D_MODEL-wide packed vector. Provides this as `token_emb` input to the local decoder instance. A small FIFO handles clock domain crossing.
+
+**multi_device_top** — Wraps the decoder with TX/RX links and a partition controller FSM:
+
+```
+                 ┌──────────────────────────────────────┐
+  serial_rx ────►│  link_rx ──► token_emb               │
+                 │                  │                    │
+                 │      ┌───────────▼─────────────────┐ │
+                 │      │ transformer_decoder_top      │ │
+                 │      │ (local layers)               │ │
+                 │      └───────────┬─────────────────┘ │
+                 │                  │                    │
+                 │          out_emb ▼                    │
+                 │  ┌───────────────────┐               │
+                 │  │ partition_ctrl    │               │
+                 │  │ if last_layer:   │               │
+                 │  │   → output port  │               │
+                 │  │ else:            │               │
+                 │  │   → link_tx ─────┼──► serial_tx  │
+                 │  └───────────────────┘               │
+                 └──────────────────────────────────────┘
+```
+
+The partition controller checks whether the current device holds the final layers. If so, the embedding goes to the output port (language model head). Otherwise, it goes to `link_tx` for forwarding to the next device.
+
+### Practical Considerations
+
+**Error handling.** High-speed serial links have non-zero bit error rates (~10⁻¹² for GTH at 16 Gbps). For inference, a single bit flip in an embedding can corrupt the entire output sequence. The Aurora core provides CRC checking and automatic retry. For additional protection, embedding checksums can be included in the transfer header.
+
+**Thermal and power.** Multi-FPGA systems require careful thermal management. Each FPGA dissipates 10–30 W depending on utilisation. A 4-FPGA system at 30 W each draws 120 W — comparable to a single GPU but distributed across multiple power domains. Board design must account for per-device power delivery and cooling.
+
+**Debugging.** Distributed systems are harder to debug than single-chip designs. Adding ILA (Integrated Logic Analyzer) probes on the link interfaces and embedding registers helps. The packed array port format makes it straightforward to capture and display embedding values in the waveform viewer.
+
+**Scalability limit.** Pipeline parallelism adds (K-1) × link_latency overhead. For autoregressive decode, device utilisation drops to 1/K without micro-batching. Beyond ~8 pipeline stages, the bubble overhead and link latencies dominate. Tensor parallelism scales better for latency but demands proportionally higher inter-device bandwidth. The practical limit depends on the link topology and bandwidth available.
+
 ## Implementation Estimates (Xilinx Artix-7)
 
 | Block | DSP48 | FFs | LUTs | BRAM18K |

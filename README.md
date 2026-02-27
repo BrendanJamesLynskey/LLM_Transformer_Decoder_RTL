@@ -326,6 +326,74 @@ Pre-norm (LayerNorm before attention/FFN) matches GPT-2, LLaMA, and most modern 
 ### KV-Cache Strategy
 Only the current token's Q is computed fresh; K and V from all prior positions are cached in dual-port BRAM, reducing per-token attention compute from O(n²·d) to O(n·d).
 
+## Use Cases and Applicability
+
+### Where This Design Fits
+
+This accelerator implements a **single decoder layer for autoregressive inference** — the core primitive of GPT-style text generation. Understanding where it applies (and where it doesn't) helps frame its value.
+
+### Inference — Primary Target
+
+This design is purpose-built for **LLM inference on edge and embedded FPGA platforms**. Several architectural choices reflect this:
+
+**Weight-stationary dataflow.** Weights are loaded once into BRAM and reused across every token. There is no gradient storage, no optimizer state, no backward pass — the entire memory budget goes to weights and KV-cache. This is the fundamental difference between inference and training hardware.
+
+**KV-cache with incremental updates.** Each new token writes one K/V vector and reads all prior positions. The dual-port BRAM design (port A writes, port B reads) supports this single-token-at-a-time pattern directly. Production inference engines like vLLM and TensorRT-LLM use exactly this pattern, managing cache memory across requests.
+
+**Fixed-point arithmetic.** Q8.8 quantisation reduces multiplier area to single DSP48 slices. Post-training quantisation to INT8 or INT4 is standard practice in production inference (GPTQ, AWQ, SmoothQuant). This design demonstrates the hardware-side implementation of quantised inference.
+
+**Low-latency single-token generation.** The design processes one token per pipeline pass (~3,200 cycles at 128 sequence length), targeting interactive generation where latency per token matters more than throughput.
+
+Concrete deployment scenarios include on-device language models for IoT/robotics (running small transformer models entirely on FPGA with no host CPU dependency), FPGA inference cards for data centre offload (Xilinx Alveo or Intel Stratix with multiple decoder layers), and custom ASIC prototyping (using the RTL as a starting point for a tape-out targeting inference workloads).
+
+### Low-Power and Edge Deployment — Strong Fit
+
+The design is well-suited to **power-constrained environments** for several reasons:
+
+**No external memory bandwidth.** With weights in on-chip BRAM (~128 KB), inference requires zero DRAM accesses for a small model. DRAM access typically dominates power consumption in neural network inference — eliminating it can reduce power by 10–100×. For the current D_MODEL=64 configuration, the entire model fits on-chip.
+
+**Clock gating opportunity.** The FSM-driven sequential architecture naturally enables clock gating: only the active module draws dynamic power in any given cycle. The systolic array, softmax, LayerNorm, and FFN are never active simultaneously.
+
+**Deterministic latency.** Fixed pipeline depth with no data-dependent branching means power draw is predictable and consistent — important for battery-powered or energy-harvesting applications.
+
+**Scaling consideration.** Production LLMs (7B+ parameters) far exceed on-chip BRAM capacity. For larger models, this architecture would require an external memory interface (HBM/DDR) with a weight-streaming controller, at which point power advantages diminish. The sweet spot is small specialised models (1M–50M parameters) that fit entirely on-chip.
+
+### Training — Not Applicable
+
+This design **does not support training** and is not easily adapted for it. The fundamental gaps are:
+
+**No backward pass.** Training requires computing gradients through every layer via backpropagation. This needs either: (a) storing all intermediate activations for the backward pass (enormous memory), or (b) recomputation (doubling latency). Neither is implemented.
+
+**No floating-point support.** Training is highly sensitive to numerical precision — modern training uses BF16 or FP32 accumulation. Q8.8 fixed-point lacks the dynamic range for gradient computation, where values can span many orders of magnitude. Straight-through estimators and loss scaling can partially compensate, but Q8.8 is too narrow for stable training.
+
+**No weight update logic.** Training requires an optimiser (SGD, Adam) that reads gradients, maintains momentum/variance state, and writes updated weights. This is an entirely separate datapath.
+
+**No batch support.** Training throughput depends on processing many samples simultaneously. This design processes one token at a time with no batching.
+
+Training accelerators (GPU, TPU, Cerebras WSE) are architecturally very different: they prioritise memory bandwidth, floating-point throughput, and all-reduce communication over the low-latency single-inference path optimised here.
+
+### Prefill vs Decode Phases
+
+Modern LLM serving splits inference into two phases with different computational profiles:
+
+**Prefill (prompt processing)** is compute-bound — it processes all prompt tokens in parallel through matrix multiplications. This design's sequential token-by-token architecture is suboptimal for prefill; a batched matrix engine would be more efficient.
+
+**Decode (token generation)** is memory-bandwidth-bound — it generates one token at a time, reading the full KV-cache each step. This is exactly what the design optimises for: single-token processing with on-chip KV-cache reuse.
+
+A production system would pair this decode engine with a separate prefill accelerator, or add a batch-mode to the systolic array for prefill.
+
+### Summary
+
+| Scenario | Fit | Notes |
+|----------|-----|-------|
+| Edge/FPGA inference (small models) | ★★★★★ | Primary design target. On-chip weights, low power, deterministic latency |
+| ASIC inference prototyping | ★★★★☆ | Proven architecture; add memory interfaces for larger models |
+| Low-power / battery-constrained | ★★★★☆ | Zero DRAM for small models; FSM enables clock gating |
+| Data centre decode engine | ★★★☆☆ | Architecture sound; needs HBM interface and multi-layer stacking |
+| Prefill / prompt processing | ★★☆☆☆ | Sequential design; would need batch-mode systolic operation |
+| Training | ☆☆☆☆☆ | Fundamentally different requirements (FP, backward pass, optimiser) |
+| Fine-tuning / LoRA | ★☆☆☆☆ | Could serve as frozen forward-pass engine with external adapter logic |
+
 ## Extending the Design
 
 **Streaming weight access**: Refactor compute modules to use address/data interfaces instead of array ports, reading weights directly from BRAM one element per cycle. This eliminates the register arrays in `transformer_decoder_top`.

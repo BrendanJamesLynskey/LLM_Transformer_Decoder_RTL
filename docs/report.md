@@ -6,7 +6,7 @@ This report documents the design, implementation, and verification of a synthesi
 
 The design provides two architectural variants: a **register-bridge** variant that copies BRAM weights into register arrays for single-cycle combinational access (maximum throughput), and a **streaming** variant that reads weights directly from BRAM one element per cycle (minimum area). Both share the same external interface, BRAM storage, and verification infrastructure.
 
-Key design features include Q8.8 fixed-point arithmetic, systolic array compute, BRAM-backed weight and KV-cache storage, division-free softmax normalisation via reciprocal LUT with Newton-Raphson refinement, and packed array ports for full simulation visibility.
+Key design features include Q8.8 fixed-point arithmetic, systolic array compute, BRAM-backed weight and KV-cache storage, division-free softmax and LayerNorm via reciprocal LUT with Newton-Raphson refinement, and packed array ports for full simulation visibility.
 
 
 ## 2. Background
@@ -86,7 +86,7 @@ The PWL exponential uses four linear segments covering [−8, 0] with non-negati
 
 #### 3.3.4 Layer Normalization
 
-LayerNorm computes the mean and variance of the input vector, then normalizes each element through three FSM stages: mean computation via sequential accumulation, variance computation using centered differences, and element-wise normalization with learnable gamma and beta parameters. The reciprocal square root uses a 4-entry LUT.
+LayerNorm computes the mean and variance of the input vector, then normalizes each element through three FSM stages: mean computation via sequential accumulation and arithmetic right-shift by log₂(VEC_LEN), variance computation using centered differences and the same right-shift, and element-wise normalization with learnable gamma and beta parameters. The reciprocal square root (1/√(variance + ε)) uses a 32-entry LUT indexed by CLZ-normalised mantissa bits, followed by one Newton-Raphson iteration — the same architectural pattern proven in the softmax normalisation path. No runtime division operators remain; all ÷N operations use arithmetic right-shift since VEC_LEN is a power of 2.
 
 #### 3.3.5 Multi-Head Attention
 
@@ -151,7 +151,7 @@ The streaming decoder testbench loads weights via the wl_en bus, then verifies s
 | Processing Element | 1 | ~30 | ~20 | — |
 | 4×4 Systolic Array | 16 | ~500 | ~350 | — |
 | Softmax Unit | 2 | ~2K | ~3K | — |
-| Layer Normalisation | 2–4 | ~300 | ~500 | — |
+| Layer Normalisation | 4–6 | ~400 | ~600 | — |
 | Multi-Head Attention | ~64 | ~5K | ~8K | — |
 | Feed-Forward Network | ~64 | ~3K | ~5K | — |
 | Weight BRAMs (12) | — | — | — | ~110 |
@@ -166,17 +166,17 @@ Clock frequency estimate: 100–200 MHz.
 
 ### 7.1 Resolved
 
-BRAM-backed weights, division-free softmax, packed array ports, streaming weight architecture (99.4% FF reduction).
+BRAM-backed weights, division-free softmax, packed array ports, streaming weight architecture (99.4% FF reduction), division-free LayerNorm (arithmetic right-shift for ÷N, 32-entry rsqrt LUT + Newton-Raphson for 1/√var).
 
 ### 7.2 Remaining
 
-LayerNorm still uses `/` operator and coarse rsqrt LUT. Only ReLU activation. Systolic array not connected to datapath. No batching.
+Only ReLU activation supported (not GELU/SiLU). Systolic array instantiated but not connected to datapath. Single-token processing with no batching.
 
 ### 7.3 Planned
 
-LayerNorm right-shift + reciprocal-LUT, systolic-tiled projections, parallel softmax, GELU/SiLU PWL, multi-layer stacking, multi-device distribution, AXI-Lite interface.
+Systolic-tiled projections, parallel softmax with N_HEADS instances, GELU/SiLU activation via PWL approximation, multi-layer stacking, multi-device distribution, AXI-Lite control/status interface.
 
 
 ## 8. Conclusion
 
-This project demonstrates a complete, synthesizable transformer decoder block in SystemVerilog with two architectural variants: a high-throughput register-bridge design and a minimum-area streaming design. The 17-module hierarchy mirrors the transformer's conceptual structure while addressing practical synthesis concerns. All 83 verification tests pass across both variants. The streaming architecture achieves 99.4% register reduction while maintaining functional equivalence, making the design feasible on the smallest FPGA targets.
+This project demonstrates a complete, synthesizable transformer decoder block in SystemVerilog with two architectural variants: a high-throughput register-bridge design and a minimum-area streaming design. The 17-module hierarchy mirrors the transformer's conceptual structure while addressing practical synthesis concerns: no runtime division operators remain in the compute datapath (softmax and LayerNorm both use LUT + Newton-Raphson, mean/variance use arithmetic right-shift). All 83 verification tests pass across both variants. The streaming architecture achieves 99.4% register reduction while maintaining functional equivalence, making the design feasible on the smallest FPGA targets.

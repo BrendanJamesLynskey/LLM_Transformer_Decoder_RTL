@@ -23,12 +23,13 @@ module systolic_array
   input  logic   clear,
   input  logic   enable,
 
-  // Input interfaces
-  input  data_t  a_in  [ROWS],  // Row activations (left edge)
-  input  data_t  b_in  [COLS],  // Column weights (top edge)
+  // Input interfaces (packed 1D)
+  input  logic signed [ROWS-1:0][DATA_WIDTH-1:0]  a_in,  // Row activations (left edge)
+  input  logic signed [COLS-1:0][DATA_WIDTH-1:0]  b_in,  // Column weights (top edge)
 
-  // Output: accumulated results from each PE
-  output acc_t   result [ROWS][COLS],
+  // Output: accumulated results from each PE (packed 1D, row-major)
+  // result[r*COLS+c] = acc_out of PE at (r,c)
+  output logic signed [ROWS*COLS-1:0][ACC_WIDTH-1:0] result,
   output logic   done
 );
 
@@ -64,7 +65,7 @@ module systolic_array
           .w_in    (w_wire[r][c]),
           .a_out   (a_wire[r][c+1]),
           .w_out   (w_wire[r+1][c]),
-          .acc_out (result[r][c])
+          .acc_out (result[r*COLS+c])
         );
       end
     end

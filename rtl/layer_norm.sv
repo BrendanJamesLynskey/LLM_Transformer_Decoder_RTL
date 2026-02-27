@@ -21,11 +21,11 @@ module layer_norm
   input  logic   rst_n,
   input  logic   start,
 
-  input  data_t  x_in    [VEC_LEN],  // Input vector
-  input  data_t  gamma   [VEC_LEN],  // Scale parameters
-  input  data_t  beta    [VEC_LEN],  // Bias parameters
+  input  logic signed [VEC_LEN-1:0][DATA_WIDTH-1:0] x_in,   // Input vector
+  input  logic signed [VEC_LEN-1:0][DATA_WIDTH-1:0] gamma,  // Scale parameters
+  input  logic signed [VEC_LEN-1:0][DATA_WIDTH-1:0] beta,   // Bias parameters
 
-  output data_t  y_out   [VEC_LEN],  // Normalized output
+  output logic signed [VEC_LEN-1:0][DATA_WIDTH-1:0] y_out,  // Normalized output
   output logic   valid
 );
 

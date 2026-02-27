@@ -42,6 +42,19 @@ package transformer_pkg;
   typedef logic [$clog2(VOCAB_SIZE)-1:0]  vocab_idx_t;// Vocab index
 
   // =========================================================================
+  // Packed Array Types (for module ports — iverilog compatibility)
+  // =========================================================================
+  // iverilog 12.0 cannot propagate values through unpacked array ports.
+  // These packed types are used at module boundaries; internal logic may
+  // freely use unpacked arrays with pack/unpack helper macros.
+  typedef logic signed [D_MODEL-1:0][DATA_WIDTH-1:0]     model_vec_t;   // D_MODEL-wide vector
+  typedef logic signed [D_FF-1:0][DATA_WIDTH-1:0]        ff_vec_t;      // D_FF-wide vector
+  typedef logic signed [D_MODEL-1:0][D_MODEL-1:0][DATA_WIDTH-1:0] model_mat_t; // D_MODEL×D_MODEL matrix
+  typedef logic signed [D_MODEL-1:0][D_FF-1:0][DATA_WIDTH-1:0]    model_ff_mat_t; // D_MODEL×D_FF matrix
+  typedef logic signed [D_FF-1:0][D_MODEL-1:0][DATA_WIDTH-1:0]    ff_model_mat_t; // D_FF×D_MODEL matrix
+  typedef logic signed [MAX_SEQ_LEN-1:0][D_MODEL-1:0][DATA_WIDTH-1:0] cache_t; // Cache matrix
+
+  // =========================================================================
   // Fixed-Point Utility Functions
   // =========================================================================
 

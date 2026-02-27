@@ -15,15 +15,15 @@ module feed_forward
   input  logic   rst_n,
   input  logic   start,
 
-  input  data_t  x_in [D_MODEL],
+  input  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] x_in,
 
-  // Weights and biases
+  // Weights and biases (unpacked 2D — set before sim)
   input  data_t  w1 [D_MODEL][D_FF],
   input  data_t  b1 [D_FF],
   input  data_t  w2 [D_FF][D_MODEL],
-  input  data_t  b2 [D_MODEL],
+  input  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] b2,
 
-  output data_t  y_out [D_MODEL],
+  output logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] y_out,
   output logic   valid
 );
 

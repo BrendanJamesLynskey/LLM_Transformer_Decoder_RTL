@@ -22,39 +22,39 @@ module transformer_decoder
   input  logic   rst_n,
   input  logic   start,
 
-  // Input token embedding
-  input  data_t  token_emb [D_MODEL],
+  // Input token embedding (packed 1D)
+  input  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] token_emb,
 
-  // Attention weights
+  // Attention weights (unpacked 2D)
   input  data_t  wq [D_MODEL][D_MODEL],
   input  data_t  wk [D_MODEL][D_MODEL],
   input  data_t  wv [D_MODEL][D_MODEL],
   input  data_t  wo [D_MODEL][D_MODEL],
 
-  // LayerNorm parameters
-  input  data_t  ln1_gamma [D_MODEL],
-  input  data_t  ln1_beta  [D_MODEL],
-  input  data_t  ln2_gamma [D_MODEL],
-  input  data_t  ln2_beta  [D_MODEL],
+  // LayerNorm parameters (packed 1D)
+  input  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ln1_gamma,
+  input  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ln1_beta,
+  input  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ln2_gamma,
+  input  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ln2_beta,
 
-  // FFN weights
+  // FFN weights (unpacked 2D, packed 1D for biases)
   input  data_t  ffn_w1 [D_MODEL][D_FF],
   input  data_t  ffn_b1 [D_FF],
   input  data_t  ffn_w2 [D_FF][D_MODEL],
-  input  data_t  ffn_b2 [D_MODEL],
+  input  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ffn_b2,
 
   // Sequence position
   input  seq_idx_t seq_pos,
 
-  // KV-Cache (external SRAM interface)
-  output data_t  k_cache_wr [D_MODEL],
-  output data_t  v_cache_wr [D_MODEL],
+  // KV-Cache
+  output logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] k_cache_wr,
+  output logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] v_cache_wr,
   output logic   cache_wr_en,
   input  data_t  k_cache [MAX_SEQ_LEN][D_MODEL],
   input  data_t  v_cache [MAX_SEQ_LEN][D_MODEL],
 
-  // Output
-  output data_t  out_emb [D_MODEL],
+  // Output (packed 1D)
+  output logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] out_emb,
   output logic   valid
 );
 
@@ -79,11 +79,11 @@ module transformer_decoder
   top_state_t state, state_next;
 
   // Intermediate signals
-  data_t ln1_out    [D_MODEL];
-  data_t attn_out   [D_MODEL];
-  data_t residual1  [D_MODEL];
-  data_t ln2_out    [D_MODEL];
-  data_t ffn_out    [D_MODEL];
+  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ln1_out;
+  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] attn_out;
+  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] residual1;
+  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ln2_out;
+  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ffn_out;
 
   // Sub-module control
   logic  ln1_start, ln1_valid;

@@ -36,13 +36,13 @@ module softmax_unit
 #(
   parameter int VEC_LEN = D_HEAD  // Length of input vector
 )(
-  input  logic                  clk,
-  input  logic                  rst_n,
-  input  logic                  start,
-  input  data_t                 scores [VEC_LEN],
+  input  logic                              clk,
+  input  logic                              rst_n,
+  input  logic                              start,
+  input  logic signed [VEC_LEN-1:0][DATA_WIDTH-1:0] scores,
 
-  output data_t                 probs  [VEC_LEN],
-  output logic                  valid
+  output logic signed [VEC_LEN-1:0][DATA_WIDTH-1:0] probs,
+  output logic                              valid
 );
 
   // =========================================================================
@@ -76,15 +76,18 @@ module softmax_unit
   // exp(x) for x in [-8, 0] mapped to Q8.8
   // Segments: [-8,-4]: ~0, [-4,-2]: steep ramp, [-2,-1]: moderate, [-1,0]: ~1
   function automatic data_t approx_exp(input data_t x);
+    data_t result;
     if (x >= 0)
       return 16'sh0100;           // exp(0) = 1.0
     else if (x > -16'sh0100)      // x in (-1, 0)
-      return 16'sh0100 + x;       // Linear: 1 + x ~ exp(x) near 0
-    else if (x > -16'sh0200)      // x in (-2, -1)
-      return 16'sh0060 + (x + 16'sh0100) >>> 1; // ~0.375 + 0.5*(x+1)
-    else if (x > -16'sh0400)      // x in (-4, -2)
-      return 16'sh0020 + (x + 16'sh0200) >>> 2; // ~0.125 + 0.25*(x+2)
-    else
+      return 16'sh0100 + x;       // Linear: 1 + x ~ exp(x) near 0  (min: 0x0001 at x=-0.996)
+    else if (x > -16'sh0200) begin // x in (-2, -1)
+      result = 16'sh0060 + (x + 16'sh0100) >>> 1; // ~0.375 + 0.5*(x+1)
+      return (result > 0) ? result : 16'sh0004;    // Clamp to minimum exp
+    end else if (x > -16'sh0400) begin // x in (-4, -2)
+      result = 16'sh0020 + (x + 16'sh0200) >>> 2; // ~0.125 + 0.25*(x+2)
+      return (result > 0) ? result : 16'sh0004;    // Clamp to minimum exp
+    end else
       return 16'sh0004;           // ~0.015 for very negative
   endfunction
 

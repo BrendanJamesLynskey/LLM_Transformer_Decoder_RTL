@@ -29,25 +29,25 @@ module multi_head_attention
   input  logic   rst_n,
   input  logic   start,
 
-  // Input token embedding
-  input  data_t  x_in [D_MODEL],
+  // Input token embedding (packed 1D)
+  input  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] x_in,
 
-  // Weight matrices (stored externally, streamed in)
+  // Weight matrices (unpacked — set before sim, no runtime propagation needed)
   input  data_t  wq [D_MODEL][D_MODEL],  // Query projection
   input  data_t  wk [D_MODEL][D_MODEL],  // Key projection
   input  data_t  wv [D_MODEL][D_MODEL],  // Value projection
   input  data_t  wo [D_MODEL][D_MODEL],  // Output projection
 
   // KV Cache interface
-  input  seq_idx_t              seq_pos,        // Current position in sequence
-  output data_t                 k_cache_wr [D_MODEL],
-  output data_t                 v_cache_wr [D_MODEL],
+  input  seq_idx_t              seq_pos,
+  output logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] k_cache_wr,
+  output logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] v_cache_wr,
   output logic                  cache_wr_en,
   input  data_t                 k_cache [MAX_SEQ_LEN][D_MODEL],
   input  data_t                 v_cache [MAX_SEQ_LEN][D_MODEL],
 
-  // Output
-  output data_t  attn_out [D_MODEL],
+  // Output (packed 1D)
+  output logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] attn_out,
   output logic   valid
 );
 
@@ -88,8 +88,8 @@ module multi_head_attention
   // Softmax unit interface
   logic  sm_start;
   logic  sm_valid;
-  data_t sm_scores_in [MAX_SEQ_LEN];   // Padded input to softmax
-  data_t sm_probs_out [MAX_SEQ_LEN];   // Output from softmax
+  logic signed [MAX_SEQ_LEN-1:0][DATA_WIDTH-1:0] sm_scores_in;  // Padded input to softmax
+  logic signed [MAX_SEQ_LEN-1:0][DATA_WIDTH-1:0] sm_probs_out;  // Output from softmax
 
   // Softmax head counter (which head is being processed)
   logic [$clog2(N_HEADS):0] sm_head_idx;

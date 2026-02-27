@@ -51,6 +51,8 @@ This is a **pre-norm** decoder architecture (GPT-2/LLaMA style) implementing aut
 
 ## Module Hierarchy
 
+### Original Architecture (register-array bridge)
+
 ```
 transformer_decoder_top          (BRAM-backed synthesis top-level)
 ├── bram_sp ×12                  (Weight/bias/parameter storage)
@@ -64,9 +66,31 @@ transformer_decoder_top          (BRAM-backed synthesis top-level)
     ├── systolic_array           (Matrix multiply engine)
     │   └── processing_element   (Single MAC unit)
     └── transformer_pkg          (Parameters, types, FP utilities)
+```
+
+### Streaming Architecture (direct BRAM access, no register arrays)
+
+```
+transformer_decoder_top_stream   (Streaming BRAM-backed top-level)
+├── bram_sp ×12                  (Weight/bias/parameter storage)
+├── kv_cache_bram ×2             (K and V caches, element-level read)
+│   └── bram_dp                  (True dual-port BRAM)
+└── transformer_decoder_stream   (Streaming decoder core)
+    ├── layer_norm ×2            (Pre-attention & pre-FFN normalisation)
+    ├── multi_head_attention_stream (Streaming attention, BRAM address/data)
+    │   └── softmax_unit         (Reciprocal-LUT softmax, time-multiplexed)
+    ├── feed_forward_stream      (Streaming FFN, BRAM address/data)
+    ├── systolic_array           (Matrix multiply engine)
+    │   └── processing_element   (Single MAC unit)
+    └── transformer_pkg          (Parameters, types, FP utilities)
+```
+
+The streaming architecture eliminates ~49K × 16-bit = 789K flip-flops by reading weights directly from BRAM via address/data interfaces. Compute modules generate BRAM addresses one cycle ahead to account for read latency. Dot products are fully serialised (one MAC per cycle) instead of using combinational for-loops. See the [Streaming Weight Architecture](#streaming-weight-architecture) section for details.
 
 Utility modules (not instantiated in top, available for future use):
-    weight_bram                  (2D weight matrix w/ column-read FSM)
+
+```
+weight_bram                      (2D weight matrix w/ column-read FSM)
 ```
 
 ## Weight Initialisation and Loading
@@ -134,6 +158,44 @@ Wraps `bram_sp` to store a ROWS × COLS matrix. Provides a column-read interface
 Attention(Q, K, V) = softmax(Q·Kᵀ / √d_k) · V
 ```
 
+## Streaming Weight Architecture
+
+The project provides two top-level variants with different weight access strategies:
+
+### Original: Register-Array Bridge (`transformer_decoder_top`)
+
+The inner compute modules (`multi_head_attention`, `feed_forward`) accept full weight matrices as combinational array ports. The top-level copies all 49,344 weight words from BRAMs into register arrays, then drives the decoder's array ports from these registers. This is simple but requires ~789K flip-flops just for weight storage.
+
+### Streaming: Direct BRAM Access (`transformer_decoder_top_stream`)
+
+The streaming compute modules (`multi_head_attention_stream`, `feed_forward_stream`) read weights directly from BRAM via address/data interfaces. The top-level muxes each BRAM's read port between the weight-loading bus and the compute read address. No register arrays are needed for the large weight matrices.
+
+**Key design choices:**
+
+**Address pipelining.** BRAM has 1-cycle read latency. Each compute module's FSM generates the next BRAM address one cycle before the data is needed. A dedicated `S_*_ADDR` state pre-issues the first address, then the main compute state processes arriving data while simultaneously requesting the next address.
+
+**Serialised dot products.** Where the original computes full D_MODEL-element dot products in a single cycle (combinational for-loop with 64 parallel multipliers), the streaming variant performs one multiply-accumulate per cycle. The QKV projection for one output dimension takes D_MODEL cycles (64) instead of 1, but uses only 3 multipliers instead of 192.
+
+**Three-BRAM lockstep.** During QKV projection, Wq, Wk, and Wv BRAMs share the same read address (`wqkv_rd_addr`) and are read simultaneously. Three separate accumulators run in parallel, producing Q, K, V for one output dimension in D_MODEL cycles.
+
+**Latency vs area comparison (per-token at seq_pos=0):**
+
+| Metric | Original | Streaming | Change |
+|--------|----------|-----------|--------|
+| QKV projection | ~64 cycles (1/dim × 64 dims) | ~4,160 cycles (65/dim × 64 dims) | ~65× slower |
+| Output projection | ~64 cycles | ~4,160 cycles | ~65× slower |
+| FFN Linear1 | ~256 cycles | ~16,896 cycles | ~66× slower |
+| FFN Linear2 | ~64 cycles | ~16,448 cycles | ~257× slower |
+| Softmax (unchanged) | ~2,568 cycles | ~2,568 cycles | Same |
+| Total pipeline | ~3,200 cycles | ~45,000 cycles | ~14× slower |
+| Weight registers | 49,344 × 16-bit = 789K FFs | 320 × 16-bit = 5K FFs | **99.4% reduction** |
+| Weight multipliers | ~192 combinational | 3 (QKV) + 1 (Wo) + 2 (FFN) = 6 | **97% reduction** |
+| DSP48 usage | ~150 | ~10 | **93% reduction** |
+
+The streaming variant trades latency for area. For small FPGAs where 789K FFs are unavailable, or for designs targeting minimum area, the streaming architecture makes the decoder feasible. For high-throughput applications, the original architecture is preferred.
+
+**Shared interface.** Both variants use the same external interface: `wl_en`/`wl_addr`/`wl_data` for weight loading, `start`/`token_emb`/`seq_pos` for inference, `out_emb`/`valid` for output. Switching between them requires only changing the top-level module instantiation.
+
 | Stage | Operation | Cycles (seq_pos=127) |
 |-------|-----------|---------------------|
 | `S_PROJ_QKV` | Project input → Q, K, V | 64 |
@@ -177,26 +239,31 @@ All computation uses **Q8.8 signed fixed-point** (16-bit) with 32-bit accumulato
 
 ```
 ├── rtl/
-│   ├── transformer_pkg.sv          # Parameters, types, FP functions
-│   ├── processing_element.sv       # Systolic PE (MAC unit)
-│   ├── systolic_array.sv           # NxN systolic matrix multiply
-│   ├── softmax_unit.sv             # Reciprocal-LUT softmax
-│   ├── layer_norm.sv               # Layer normalisation
-│   ├── multi_head_attention.sv     # Multi-head attention + softmax + KV cache
-│   ├── feed_forward.sv             # Position-wise FFN (ReLU)
-│   ├── transformer_decoder.sv      # Decoder compute core
-│   ├── bram_sp.sv                  # Generic single-port BRAM
-│   ├── bram_dp.sv                  # Generic true dual-port BRAM
-│   ├── weight_bram.sv              # 2D weight matrix w/ column-read FSM
-│   ├── kv_cache_bram.sv            # KV-cache controller (dual-port)
-│   └── transformer_decoder_top.sv  # BRAM-backed synthesis top-level
+│   ├── transformer_pkg.sv                # Parameters, types, FP functions
+│   ├── processing_element.sv             # Systolic PE (MAC unit)
+│   ├── systolic_array.sv                 # NxN systolic matrix multiply
+│   ├── softmax_unit.sv                   # Reciprocal-LUT softmax
+│   ├── layer_norm.sv                     # Layer normalisation
+│   ├── multi_head_attention.sv           # Multi-head attention (array ports)
+│   ├── multi_head_attention_stream.sv    # Multi-head attention (BRAM streaming)
+│   ├── feed_forward.sv                   # Position-wise FFN (array ports)
+│   ├── feed_forward_stream.sv            # Position-wise FFN (BRAM streaming)
+│   ├── transformer_decoder.sv            # Decoder core (array ports)
+│   ├── transformer_decoder_stream.sv     # Decoder core (BRAM streaming)
+│   ├── bram_sp.sv                        # Generic single-port BRAM
+│   ├── bram_dp.sv                        # Generic true dual-port BRAM
+│   ├── weight_bram.sv                    # 2D weight matrix w/ column-read FSM
+│   ├── kv_cache_bram.sv                  # KV-cache controller (dual-port)
+│   ├── transformer_decoder_top.sv        # BRAM top-level (register bridge)
+│   └── transformer_decoder_top_stream.sv # BRAM top-level (direct streaming)
 ├── tb/
 │   ├── sv/
 │   │   ├── tb_processing_element.sv
 │   │   ├── tb_systolic_array.sv
 │   │   ├── tb_softmax.sv
 │   │   ├── tb_bram.sv
-│   │   └── tb_transformer_decoder.sv
+│   │   ├── tb_transformer_decoder.sv
+│   │   └── tb_transformer_decoder_stream.sv
 │   └── cocotb/
 │       ├── test_processing_element.py
 │       ├── test_softmax.py
@@ -214,7 +281,7 @@ All computation uses **Q8.8 signed fixed-point** (16-bit) with 32-bit accumulato
 
 ## Verification
 
-The project has three verification layers: a bit-accurate Python model (54 tests), structural RTL lint (13 files), and iverilog RTL simulation (5 testbenches).
+The project has three verification layers: a bit-accurate Python model (54 tests), structural RTL lint, and iverilog RTL simulation (6 testbenches, 29 tests).
 
 ### Behavioural Model (Python — no simulator needed)
 
@@ -265,37 +332,35 @@ brew install icarus-verilog      # macOS
 | tb_softmax | ✓ | **4/4 PASS** |
 | tb_bram | ✓ | **8/8 PASS** |
 | tb_transformer_decoder | ✓ | **4/4 PASS** |
-| Full hierarchy (13 files) | ✓ | **Compiles clean** |
+| tb_transformer_decoder_stream | ✓ | **3/3 PASS** |
+| Full hierarchy (17 RTL files) | ✓ | **Compiles clean** |
 
-**Total: 80/80 tests pass** (54 behavioural + 26 RTL simulation).
+**Total: 83/83 tests pass** (54 behavioural + 29 RTL simulation).
 
 All module ports use packed arrays (`logic signed [N-1:0][W-1:0]`) for 1D vector signals, ensuring correct value propagation in iverilog. Multi-dimensional weight matrices remain as unpacked arrays (set before simulation start).
 
 #### Running Tests
 
 ```bash
+# All tests via master script
+./scripts/run_sim.sh all
+
 # Individual testbenches
-iverilog -g2012 -o sim_pe rtl/transformer_pkg.sv rtl/processing_element.sv tb/sv/tb_processing_element.sv && vvp sim_pe
+./scripts/run_sim.sh pe         # Processing Element
+./scripts/run_sim.sh systolic   # Systolic Array
+./scripts/run_sim.sh softmax    # Softmax Unit
+./scripts/run_sim.sh bram       # BRAM & KV-Cache
+./scripts/run_sim.sh decoder    # Original decoder
+./scripts/run_sim.sh stream     # Streaming decoder
 
-iverilog -g2012 -o sim_bram rtl/transformer_pkg.sv rtl/bram_sp.sv rtl/bram_dp.sv tb/sv/tb_bram.sv && vvp sim_bram
-
-# Full decoder integration
-iverilog -g2012 -o sim_decoder \
+# Streaming decoder integration (manual)
+iverilog -g2012 -o sim_stream \
   rtl/transformer_pkg.sv rtl/bram_sp.sv rtl/bram_dp.sv \
-  rtl/processing_element.sv rtl/systolic_array.sv \
+  rtl/kv_cache_bram.sv rtl/processing_element.sv rtl/systolic_array.sv \
   rtl/softmax_unit.sv rtl/layer_norm.sv \
-  rtl/multi_head_attention.sv rtl/feed_forward.sv \
-  rtl/transformer_decoder.sv \
-  tb/sv/tb_transformer_decoder.sv && vvp sim_decoder
-
-# Full hierarchy (compilation check)
-iverilog -g2012 -o sim_top \
-  rtl/transformer_pkg.sv rtl/bram_sp.sv rtl/bram_dp.sv \
-  rtl/processing_element.sv rtl/systolic_array.sv \
-  rtl/softmax_unit.sv rtl/layer_norm.sv \
-  rtl/multi_head_attention.sv rtl/feed_forward.sv \
-  rtl/transformer_decoder.sv rtl/kv_cache_bram.sv \
-  rtl/weight_bram.sv rtl/transformer_decoder_top.sv
+  rtl/multi_head_attention_stream.sv rtl/feed_forward_stream.sv \
+  rtl/transformer_decoder_stream.sv rtl/transformer_decoder_top_stream.sv \
+  tb/sv/tb_transformer_decoder_stream.sv && vvp sim_stream
 ```
 
 ### CocoTB Tests

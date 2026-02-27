@@ -402,9 +402,134 @@ A production system would pair this decode engine with a separate prefill accele
 
 **Tiled projections**: Route QKV and output projections through the 4×4 systolic array for reduced critical path.
 
-**Multi-layer**: Chain N `transformer_decoder_top` instances with shared or replicated weight BRAMs.
+**Multi-layer stacking**: See dedicated section below.
 
 **Scaling up**: Increase `D_MODEL`, `N_HEADS`, `D_FF` in `transformer_pkg.sv`.
+
+## Multi-Layer Stacking
+
+A production LLM uses many identical decoder layers (GPT-2: 12–48, LLaMA-7B: 32, LLaMA-70B: 80). This design implements a single layer. Stacking multiple layers to form a complete model can follow several strategies, each with different area/performance/memory trade-offs.
+
+### Strategy 1: Spatial Replication (One Layer Per Instance)
+
+The most straightforward approach: instantiate N separate `transformer_decoder_top` modules, each with its own weight BRAMs, and chain their outputs to inputs.
+
+```
+token_emb ──► [Layer 0] ──► [Layer 1] ──► ... ──► [Layer N-1] ──► logits
+               128 KB         128 KB                  128 KB
+```
+
+**Wiring.** Each layer's `out_emb` connects directly to the next layer's `token_emb`. A top-level sequencer asserts `start` on layer 0, waits for `valid`, then asserts `start` on layer 1, and so on. The `seq_pos` signal is shared across all layers (same token position in every layer).
+
+**KV-cache.** Each layer maintains its own independent KV-cache BRAM pair. This is correct — in a transformer, each layer's attention operates on its own K/V projections, so caches are not shared between layers.
+
+**Resource cost.** Linear in N: an N-layer model requires N × 126 BRAM18K (~128 KB each). A 12-layer GPT-2-small-scale model at D_MODEL=64 would need ~1,512 BRAM18K and ~1.5 MB — feasible on a Xilinx Kintex UltraScale (1,800+ BRAM18K) or Alveo U250 (5,376 BRAM18K). Compute resources (DSP48, LUTs) also scale linearly.
+
+**Latency.** N × single-layer latency (~3,200 cycles per layer at seq_len=128). All layers execute sequentially since each depends on the previous layer's output. For 12 layers: ~38,400 cycles = ~384 μs at 100 MHz.
+
+**When to use.** When the FPGA is large enough to hold all layers simultaneously. This gives the simplest control logic and the lowest latency since there is no weight reloading overhead.
+
+### Strategy 2: Temporal Reuse (Single Instance, Weight Swapping)
+
+Use a single `transformer_decoder_top` instance and reload its weight BRAMs between layers.
+
+```
+                    ┌──────────────────────────┐
+token_emb ──►       │  transformer_decoder_top  │ ──► out_emb
+                    │  (single instance)        │       │
+                    └──────────────────────────┘       │
+                         ▲                              │
+                         │ weight-load bus              │
+              ┌──────────┴──────────┐          ┌───────▼───────┐
+              │  External Memory    │          │  Embedding    │
+              │  (DDR/HBM/Flash)   │          │  Register     │
+              │  Layer 0 weights   │          │  (feedback)   │
+              │  Layer 1 weights   │          └───────────────┘
+              │  ...               │
+              └─────────────────────┘
+```
+
+**Weight loading.** Between each layer pass, a DMA controller streams the next layer's 49,344 weights through the `wl_en`/`wl_addr`/`wl_data` bus. At one word per cycle, this takes ~49,344 cycles. With a wider bus (32-bit or 64-bit data), this halves or quarters.
+
+**Embedding feedback.** The `out_emb` output is registered and fed back to `token_emb` for the next layer pass. A simple output register with a mux (external input for layer 0, feedback for layers 1+) handles this.
+
+**KV-cache management.** This is the main complication. Each layer needs its own KV-cache, but the single instance only has one pair of cache BRAMs. Options: (a) save/restore cache contents to external memory between layers (expensive — 16 KB per layer per swap), (b) use external memory for all KV-cache storage with an address offset per layer, or (c) keep N separate KV-cache BRAM pairs while sharing the compute core (hybrid approach, see Strategy 3).
+
+**Resource cost.** Constant compute resources (1× decoder = ~126 BRAM18K for weights). KV-cache storage depends on the approach chosen. External memory bandwidth becomes the bottleneck.
+
+**Latency.** N × (compute_time + weight_load_time). For 12 layers with 49K-cycle reload: ~12 × (3,200 + 49,344) = ~630,528 cycles. The weight reload dominates — the design spends 94% of its time loading weights. A wider weight bus or block-RAM DMA is essential to make this practical.
+
+**When to use.** When the target FPGA cannot fit multiple layer instances. Requires external memory with sufficient bandwidth. Best paired with the streaming weight architecture (see Extending the Design) which eliminates the register-array pre-load.
+
+### Strategy 3: Hybrid (Shared Compute, Dedicated KV-Cache)
+
+A middle ground: one compute core with weight swapping, but N dedicated KV-cache BRAM pairs that persist across all tokens.
+
+```
+                    ┌─────────────────────────────────────┐
+                    │  multi_layer_top                     │
+                    │                                      │
+                    │  ┌────────────────────────────────┐ │
+ token_emb ────────►│  │ transformer_decoder (shared)    │ │
+                    │  │ + Weight BRAMs (swapped/layer)  │ │
+                    │  └───────────┬────────────────────┘ │
+                    │              │                       │
+                    │  ┌───────────▼────────────────────┐ │
+                    │  │ KV-Cache Bank                   │ │
+                    │  │ Layer 0: K₀[128×64] V₀[128×64] │ │
+                    │  │ Layer 1: K₁[128×64] V₁[128×64] │ │
+                    │  │ ...                              │ │
+                    │  │ Layer N: Kₙ[128×64] Vₙ[128×64] │ │
+                    │  └──────────────────────────────────┘ │
+                    └─────────────────────────────────────┘
+```
+
+**How it works.** The compute core processes layer 0, writing to KV-cache bank 0 and reading from KV-cache bank 0. Then weights are swapped and it processes layer 1 with KV-cache bank 1, and so on. A layer-index register selects which cache bank connects to the decoder's cache ports.
+
+**KV-cache cost.** N layers × 2 BRAMs × ~8 BRAM18K = 16N BRAM18K. For 12 layers: 192 BRAM18K just for cache. Combined with the shared compute BRAMs (~126): ~318 BRAM18K total.
+
+**Advantage over Strategy 2.** No cache save/restore traffic. The KV-cache is the state that grows with sequence length and must persist across every token generation step — keeping it on-chip avoids the most latency-sensitive external memory accesses.
+
+**When to use.** When the FPGA has enough BRAM for N cache banks but not N full layer instances. This is often the right trade-off: cache BRAMs (16N BRAM18K) are much cheaper than full weight BRAMs (126N BRAM18K).
+
+### Strategy 4: Pipelined Layers
+
+If the FPGA can fit N layer instances, overlap execution across tokens rather than running them sequentially.
+
+```
+Token t:    [L0]──►[L1]──►[L2]──►...──►[LN]──► output
+Token t+1:         [L0]──►[L1]──►[L2]──►...──►[LN]──► output
+Token t+2:                [L0]──►[L1]──►...
+```
+
+Once layer 0 finishes token t and passes its output to layer 1, layer 0 can immediately begin processing token t+1. This creates a pipeline with throughput of one token per single-layer latency (~3,200 cycles) rather than one token per N-layer latency.
+
+**Requirement.** Each layer needs independent weight BRAMs (same as Strategy 1) AND each layer's KV-cache must support concurrent read (for the current token) and write (for the new token). The dual-port BRAM already supports this.
+
+**Complication.** Autoregressive generation has a data dependency: the next token depends on the final layer's output (via the language model head and sampling). So the pipeline only helps with throughput if processing a batch of independent sequences, or during prefill when all tokens are known in advance. For single-sequence autoregressive decode, pipelining provides no benefit — each token must complete all N layers before the next token's identity is known.
+
+**When to use.** Batch inference or prefill, where multiple independent tokens can be in-flight simultaneously. Not useful for single-sequence autoregressive generation.
+
+### Comparison
+
+| Strategy | BRAM18K (12 layers) | Latency/token | Weight bandwidth | Complexity |
+|----------|---------------------|---------------|-----------------|------------|
+| Spatial replication | ~1,512 | ~38K cycles | None (all on-chip) | Low |
+| Temporal reuse | ~126 + ext. mem | ~630K cycles | ~600K words/token | Medium |
+| Hybrid (shared compute) | ~318 + ext. mem | ~630K cycles | ~600K words/token | Medium |
+| Pipelined | ~1,512 | ~3.2K cycles* | None (all on-chip) | High |
+
+\* Throughput per token in steady state; single-sequence autoregressive decode still takes ~38K cycles.
+
+### Practical Implementation Notes
+
+**Top-level sequencer.** All strategies need a state machine that manages the layer progression: tracking the current layer index, asserting start/waiting for valid on each layer pass, managing the embedding feedback path, and (for weight-swapping strategies) triggering weight reloads between layers.
+
+**Embedding register.** A D_MODEL-wide register between layers stores the intermediate embedding. For Strategy 1, this is just wiring; for Strategies 2–3, it requires an explicit register with feedback mux.
+
+**Layer-norm final.** Production transformers apply a final LayerNorm after the last decoder layer, before the language model head. This would be one additional `layer_norm` instance at the output of the layer stack.
+
+**Language model head.** After all N decoder layers, the output embedding is projected to vocabulary logits via a large matrix multiply (D_MODEL × VOCAB_SIZE). This is a single linear layer with no bias, often sharing weights with the input embedding table. For D_MODEL=64, VOCAB_SIZE=256: 16K parameters, fitting in one additional BRAM.
 
 ## Implementation Estimates (Xilinx Artix-7)
 

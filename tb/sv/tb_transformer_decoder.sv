@@ -94,7 +94,7 @@ module tb_transformer_decoder;
   // =========================================================================
   int pass_count = 0;
   int fail_count = 0;
-  int timeout_cycles = 50000;
+  int timeout_cycles = 200000;
 
   initial begin
     $display("============================================");

@@ -40,12 +40,15 @@ module systolic_array
   logic [$clog2(ROWS+COLS):0] cycle_cnt;
 
   // Connect inputs to left and top edges
-  always_comb begin
-    for (int r = 0; r < ROWS; r++)
-      a_wire[r][0] = a_in[r];
-    for (int c = 0; c < COLS; c++)
-      w_wire[0][c] = b_in[c];
-  end
+  genvar gi;
+  generate
+    for (gi = 0; gi < ROWS; gi++) begin : gen_a_in
+      assign a_wire[gi][0] = a_in[gi];
+    end
+    for (gi = 0; gi < COLS; gi++) begin : gen_b_in
+      assign w_wire[0][gi] = b_in[gi];
+    end
+  endgenerate
 
   // Instantiate PE grid
   genvar r, c;

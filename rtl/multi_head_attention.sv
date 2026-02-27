@@ -7,13 +7,19 @@
 //
 // For decoder (causal) inference, this operates on a single query token
 // against the full KV-cache. The module:
-//   1. Projects input x to Q, K, V via linear layers (via systolic array)
+//   1. Projects input x to Q, K, V via linear layers
 //   2. Splits into N_HEADS parallel heads
 //   3. Computes scaled dot-product attention per head
-//   4. Concatenates heads and projects output
+//   4. Applies softmax via an instantiated softmax_unit (time-multiplexed)
+//   5. Concatenates heads and projects output
 //
 // KV-Cache: Stores K and V vectors for all previous positions to enable
 // autoregressive generation without recomputation.
+//
+// Softmax Integration: A single softmax_unit (VEC_LEN = MAX_SEQ_LEN) is
+// time-multiplexed across heads. Positions beyond seq_pos are padded with
+// a large negative value (-128.0) so softmax drives them to near-zero
+// probability, implementing the causal mask.
 // =============================================================================
 
 module multi_head_attention
@@ -53,7 +59,9 @@ module multi_head_attention
     S_PROJ_QKV,
     S_WRITE_CACHE,
     S_SCORE,
-    S_SOFTMAX_WAIT,
+    S_SOFTMAX_PREP,     // Prepare padded score vector for current head
+    S_SOFTMAX_RUN,      // Start softmax_unit and wait for completion
+    S_SOFTMAX_STORE,    // Copy softmax output into head_probs, advance head
     S_WEIGHTED_SUM,
     S_OUTPUT_PROJ,
     S_DONE
@@ -77,12 +85,36 @@ module multi_head_attention
   logic [$clog2(MAX_SEQ_LEN):0] pos_idx;
   logic [$clog2(N_HEADS):0]     head_idx;
 
-  // Softmax control
-  logic softmax_start;
-  logic softmax_done;
+  // Softmax unit interface
+  logic  sm_start;
+  logic  sm_valid;
+  data_t sm_scores_in [MAX_SEQ_LEN];   // Padded input to softmax
+  data_t sm_probs_out [MAX_SEQ_LEN];   // Output from softmax
 
-  // Scale factor: 1/sqrt(D_HEAD) in Q8.8 ≈ 1/4 = 0x0040
+  // Softmax head counter (which head is being processed)
+  logic [$clog2(N_HEADS):0] sm_head_idx;
+
+  // Scale factor: 1/sqrt(D_HEAD) in Q8.8 = 1/4 = 0x0040
   localparam data_t SCALE_FACTOR = 16'sh0040;
+
+  // Large negative for causal mask padding: -8.0 in Q8.8
+  // Chosen to be within the PWL exp range and avoid overflow when
+  // subtracted from positive scores in the softmax's max-subtract step.
+  localparam data_t NEG_INF = -16'sh0800;
+
+  // =========================================================================
+  // Softmax Unit Instantiation (VEC_LEN = MAX_SEQ_LEN)
+  // =========================================================================
+  softmax_unit #(
+    .VEC_LEN(MAX_SEQ_LEN)
+  ) u_softmax (
+    .clk    (clk),
+    .rst_n  (rst_n),
+    .start  (sm_start),
+    .scores (sm_scores_in),
+    .probs  (sm_probs_out),
+    .valid  (sm_valid)
+  );
 
   // =========================================================================
   // Sequential Logic
@@ -95,7 +127,8 @@ module multi_head_attention
       dim_idx      <= '0;
       pos_idx      <= '0;
       head_idx     <= '0;
-      softmax_start<= 1'b0;
+      sm_head_idx  <= '0;
+      sm_start     <= 1'b0;
       for (int i = 0; i < D_MODEL; i++) begin
         q_vec[i]      <= '0;
         k_vec[i]      <= '0;
@@ -105,10 +138,12 @@ module multi_head_attention
         k_cache_wr[i] <= '0;
         v_cache_wr[i] <= '0;
       end
+      for (int t = 0; t < MAX_SEQ_LEN; t++)
+        sm_scores_in[t] <= '0;
     end else begin
       state <= state_next;
-      softmax_start <= 1'b0;
-      cache_wr_en   <= 1'b0;
+      sm_start    <= 1'b0;
+      cache_wr_en <= 1'b0;
 
       case (state)
         S_IDLE: begin
@@ -158,28 +193,41 @@ module multi_head_attention
               head_scores[head_idx][pos_idx] <= fp_mul(data_t'(dot >>> FRAC_BITS), SCALE_FACTOR);
               pos_idx <= pos_idx + 1;
             end else begin
-              // Causal mask: set future positions to large negative
+              // Advance to next head
               head_idx <= head_idx + 1;
               pos_idx  <= '0;
             end
           end else begin
-            softmax_start <= 1'b1;
+            // All scores computed, begin softmax processing
+            sm_head_idx <= '0;
           end
         end
 
-        S_SOFTMAX_WAIT: begin
-          // Wait for softmax completion (simplified: direct copy for now)
-          // In full implementation, instantiate softmax_unit per head
-          for (int h = 0; h < N_HEADS; h++) begin
-            for (int t = 0; t < MAX_SEQ_LEN; t++) begin
-              if (t <= int'(seq_pos))
-                head_probs[h][t] <= head_scores[h][t]; // Simplified
-              else
-                head_probs[h][t] <= '0;
-            end
+        // Prepare the softmax input vector for the current head
+        // Valid positions get actual scores; future positions get NEG_INF
+        S_SOFTMAX_PREP: begin
+          for (int t = 0; t < MAX_SEQ_LEN; t++) begin
+            if (t <= int'(seq_pos))
+              sm_scores_in[t] <= head_scores[sm_head_idx][t];
+            else
+              sm_scores_in[t] <= NEG_INF;
           end
-          head_idx <= '0;
-          dim_idx  <= '0;
+          sm_start <= 1'b1;
+        end
+
+        // Wait for softmax_unit to complete
+        S_SOFTMAX_RUN: begin
+          // sm_start was pulsed in PREP; now just wait for sm_valid
+        end
+
+        // Store softmax results for this head, advance to next
+        S_SOFTMAX_STORE: begin
+          for (int t = 0; t < MAX_SEQ_LEN; t++)
+            head_probs[sm_head_idx][t] <= sm_probs_out[t];
+          sm_head_idx <= sm_head_idx + 1;
+          // Reset head_idx for weighted sum when this is the last head
+          if (sm_head_idx >= (N_HEADS[$clog2(N_HEADS):0] - 1))
+            head_idx <= '0;
         end
 
         // Weighted sum: out_h = sum_t(probs[t] * V_h[t])
@@ -229,15 +277,20 @@ module multi_head_attention
   always_comb begin
     state_next = state;
     case (state)
-      S_IDLE:          if (start) state_next = S_PROJ_QKV;
-      S_PROJ_QKV:      if (dim_idx >= D_MODEL[$clog2(D_MODEL):0]) state_next = S_WRITE_CACHE;
-      S_WRITE_CACHE:   state_next = S_SCORE;
-      S_SCORE:         if (head_idx >= N_HEADS[$clog2(N_HEADS):0]) state_next = S_SOFTMAX_WAIT;
-      S_SOFTMAX_WAIT:  state_next = S_WEIGHTED_SUM;
-      S_WEIGHTED_SUM:  if (head_idx >= N_HEADS[$clog2(N_HEADS):0]) state_next = S_OUTPUT_PROJ;
-      S_OUTPUT_PROJ:   if (dim_idx >= D_MODEL[$clog2(D_MODEL):0]) state_next = S_DONE;
-      S_DONE:          state_next = S_IDLE;
-      default:         state_next = S_IDLE;
+      S_IDLE:           if (start) state_next = S_PROJ_QKV;
+      S_PROJ_QKV:       if (dim_idx >= D_MODEL[$clog2(D_MODEL):0]) state_next = S_WRITE_CACHE;
+      S_WRITE_CACHE:    state_next = S_SCORE;
+      S_SCORE:          if (head_idx >= N_HEADS[$clog2(N_HEADS):0]) state_next = S_SOFTMAX_PREP;
+      S_SOFTMAX_PREP:   state_next = S_SOFTMAX_RUN;
+      S_SOFTMAX_RUN:    if (sm_valid) state_next = S_SOFTMAX_STORE;
+      S_SOFTMAX_STORE:  if (sm_head_idx >= (N_HEADS[$clog2(N_HEADS):0] - 1))
+                          state_next = S_WEIGHTED_SUM;
+                        else
+                          state_next = S_SOFTMAX_PREP;
+      S_WEIGHTED_SUM:   if (head_idx >= N_HEADS[$clog2(N_HEADS):0]) state_next = S_OUTPUT_PROJ;
+      S_OUTPUT_PROJ:    if (dim_idx >= D_MODEL[$clog2(D_MODEL):0]) state_next = S_DONE;
+      S_DONE:           state_next = S_IDLE;
+      default:          state_next = S_IDLE;
     endcase
   end
 

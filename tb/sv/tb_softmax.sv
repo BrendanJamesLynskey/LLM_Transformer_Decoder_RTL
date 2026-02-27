@@ -9,8 +9,8 @@ module tb_softmax;
   localparam int VEC_LEN = 8;
 
   logic   clk, rst_n, start, valid;
-  data_t  scores [VEC_LEN];
-  data_t  probs  [VEC_LEN];
+  logic signed [VEC_LEN-1:0][DATA_WIDTH-1:0] scores;
+  logic signed [VEC_LEN-1:0][DATA_WIDTH-1:0] probs;
 
   softmax_unit #(.VEC_LEN(VEC_LEN)) dut (.*);
 

@@ -10,9 +10,9 @@ module tb_systolic_array;
   localparam int COLS = 4;
 
   logic  clk, rst_n, clear, enable;
-  data_t a_in [ROWS];
-  data_t b_in [COLS];
-  acc_t  result [ROWS][COLS];
+  logic signed [ROWS-1:0][DATA_WIDTH-1:0] a_in;
+  logic signed [COLS-1:0][DATA_WIDTH-1:0] b_in;
+  logic signed [ROWS*COLS-1:0][ACC_WIDTH-1:0] result;
   logic  done;
 
   systolic_array #(.ROWS(ROWS), .COLS(COLS)) dut (.*);
@@ -102,16 +102,16 @@ module tb_systolic_array;
     for (int r = 0; r < ROWS; r++) begin
       $write("  Row %0d: ", r);
       for (int c = 0; c < COLS; c++)
-        $write("%8h ", result[r][c]);
+        $write("%8h ", result[r*COLS+c]);
       $display("");
     end
 
     // Check [0][0]: 1.0 * 2.0 = 2.0 in full precision = 0x20000
-    if (result[0][0] == 32'sh00020000) begin
-      $display("[PASS] result[0][0] = 2.0 (correct)");
+    if (result[0] == 32'sh00020000) begin
+      $display("[PASS] result[0] = 2.0 (correct)");
       pass_count++;
     end else begin
-      $display("[FAIL] result[0][0] = %h, expected 00020000", result[0][0]);
+      $display("[FAIL] result[0] = %h, expected 00020000", result[0]);
       fail_count++;
     end
 
@@ -132,7 +132,7 @@ module tb_systolic_array;
     clear = 0;
     @(posedge clk);
 
-    if (!done && result[0][0] == 0) begin
+    if (!done && result[0] == 0) begin
       $display("[PASS] Clear resets array");
       pass_count++;
     end else begin
@@ -158,7 +158,7 @@ module tb_systolic_array;
     wait(done);
     @(posedge clk);
 
-    $display("  Uniform result[0][0] = %h", result[0][0]);
+    $display("  Uniform result[0] = %h", result[0]);
     pass_count++; // Smoke test pass
 
     // Summary

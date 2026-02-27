@@ -12,32 +12,32 @@ module tb_transformer_decoder;
 
   // Signals
   logic     clk, rst_n, start, valid;
-  data_t    token_emb [D_MODEL];
+  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] token_emb;
 
   data_t    wq [D_MODEL][D_MODEL];
   data_t    wk [D_MODEL][D_MODEL];
   data_t    wv [D_MODEL][D_MODEL];
   data_t    wo [D_MODEL][D_MODEL];
 
-  data_t    ln1_gamma [D_MODEL];
-  data_t    ln1_beta  [D_MODEL];
-  data_t    ln2_gamma [D_MODEL];
-  data_t    ln2_beta  [D_MODEL];
+  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ln1_gamma;
+  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ln1_beta;
+  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ln2_gamma;
+  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ln2_beta;
 
   data_t    ffn_w1 [D_MODEL][D_FF];
   data_t    ffn_b1 [D_FF];
   data_t    ffn_w2 [D_FF][D_MODEL];
-  data_t    ffn_b2 [D_MODEL];
+  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ffn_b2;
 
   seq_idx_t seq_pos;
 
-  data_t    k_cache_wr [D_MODEL];
-  data_t    v_cache_wr [D_MODEL];
+  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] k_cache_wr;
+  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] v_cache_wr;
   logic     cache_wr_en;
   data_t    k_cache [MAX_SEQ_LEN][D_MODEL];
   data_t    v_cache [MAX_SEQ_LEN][D_MODEL];
 
-  data_t    out_emb [D_MODEL];
+  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] out_emb;
 
   // DUT
   transformer_decoder dut (.*);

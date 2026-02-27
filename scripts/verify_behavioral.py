@@ -435,9 +435,11 @@ class SoftmaxUnit:
         elif x_s > -0x0100:  # > -1.0
             return (0x0100 + x_s) & MASK_16
         elif x_s > -0x0200:  # > -2.0
-            return (0x0060 + ((x_s + 0x0100) >> 1)) & MASK_16
+            result = (0x0060 + ((x_s + 0x0100) >> 1)) & MASK_16
+            return result if sign_extend_16(result) > 0 else 0x0004
         elif x_s > -0x0400:  # > -4.0
-            return (0x0020 + ((x_s + 0x0200) >> 2)) & MASK_16
+            result = (0x0020 + ((x_s + 0x0200) >> 2)) & MASK_16
+            return result if sign_extend_16(result) > 0 else 0x0004
         else:
             return 0x0004
 

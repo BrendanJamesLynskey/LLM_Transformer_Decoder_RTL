@@ -4,12 +4,15 @@
 // Implements LayerNorm(x) = gamma * (x - mean) / sqrt(variance + eps) + beta
 //
 // Pipeline stages:
-//   1. Compute mean = sum(x_i) / N
-//   2. Compute variance = sum((x_i - mean)^2) / N
-//   3. Normalize: y_i = gamma * (x_i - mean) * rsqrt(var + eps) + beta
+//   1. Compute mean = sum(x_i) >>> log2(N)  (arithmetic right-shift)
+//   2. Compute variance = sum((x_i - mean)^2) >>> log2(N)
+//   3. Compute inv_std = 1/sqrt(var + eps) via 32-entry rsqrt LUT + Newton-Raphson
+//   4. Normalize: y_i = gamma * (x_i - mean) * inv_std + beta
 //
-// Uses fixed-point arithmetic throughout. The reciprocal sqrt is approximated
-// via a small LUT defined in transformer_pkg.
+// Division-free: all divisions by VEC_LEN use arithmetic right-shift (VEC_LEN
+// must be a power of 2). The reciprocal square root uses a 32-entry LUT with
+// one Newton-Raphson iteration (~12 bits accuracy), matching the approach
+// proven in the softmax normalisation path.
 // =============================================================================
 
 module layer_norm
@@ -84,8 +87,8 @@ module layer_norm
             sum_acc <= sum_acc + acc_t'(x_in[idx]);
             idx <= idx + 1;
           end else begin
-            // mean = sum / N (shift for power-of-2 N, else divide)
-            mean_val <= data_t'(sum_acc / VEC_LEN);
+            // mean = sum / N via arithmetic right-shift (VEC_LEN is power of 2)
+            mean_val <= data_t'(sum_acc >>> $clog2(VEC_LEN));
             idx      <= '0;
           end
         end
@@ -96,9 +99,9 @@ module layer_norm
             var_acc <= var_acc + acc_t'(fp_mul(x_in[idx] - mean_val, x_in[idx] - mean_val));
             idx <= idx + 1;
           end else begin
-            var_val <= data_t'(var_acc / VEC_LEN);
-            // Compute 1/sqrt(variance + epsilon)
-            inv_std <= fp_inv_sqrt(data_t'(var_acc / VEC_LEN) + 16'sh0001);
+            var_val <= data_t'(var_acc >>> $clog2(VEC_LEN));
+            // Compute 1/sqrt(variance + epsilon) via LUT + Newton-Raphson
+            inv_std <= fp_inv_sqrt(data_t'(var_acc >>> $clog2(VEC_LEN)) + 16'sh0001);
             idx     <= '0;
           end
         end

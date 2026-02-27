@@ -70,20 +70,56 @@ run_decoder() {
     echo ""
 }
 
+run_bram() {
+    echo -e "${CYAN}========== BRAM & KV-Cache Test ==========${NC}"
+    iverilog -g2012 -o "$SIM_DIR/bram_tb" \
+        "$RTL_PKG" \
+        "$RTL_DIR/bram_sp.sv" \
+        "$RTL_DIR/bram_dp.sv" \
+        "$RTL_DIR/kv_cache_bram.sv" \
+        "$TB_DIR/tb_bram.sv"
+    vvp "$SIM_DIR/bram_tb" | tee "$SIM_DIR/bram_results.log"
+    echo ""
+}
+
+run_stream() {
+    echo -e "${CYAN}========== Streaming Decoder Test ==========${NC}"
+    iverilog -g2012 -o "$SIM_DIR/stream_tb" \
+        "$RTL_PKG" \
+        "$RTL_DIR/bram_sp.sv" \
+        "$RTL_DIR/bram_dp.sv" \
+        "$RTL_DIR/kv_cache_bram.sv" \
+        "$RTL_DIR/processing_element.sv" \
+        "$RTL_DIR/systolic_array.sv" \
+        "$RTL_DIR/softmax_unit.sv" \
+        "$RTL_DIR/layer_norm.sv" \
+        "$RTL_DIR/multi_head_attention_stream.sv" \
+        "$RTL_DIR/feed_forward_stream.sv" \
+        "$RTL_DIR/transformer_decoder_stream.sv" \
+        "$RTL_DIR/transformer_decoder_top_stream.sv" \
+        "$TB_DIR/tb_transformer_decoder_stream.sv"
+    vvp "$SIM_DIR/stream_tb" | tee "$SIM_DIR/stream_results.log"
+    echo ""
+}
+
 case "${1:-all}" in
     pe)       run_pe ;;
     systolic) run_systolic ;;
     softmax)  run_softmax ;;
     decoder)  run_decoder ;;
+    bram)     run_bram ;;
+    stream)   run_stream ;;
     all)
         run_pe
         run_systolic
         run_softmax
         run_decoder
+        run_bram
+        run_stream
         echo -e "${GREEN}========== All Tests Complete ==========${NC}"
         ;;
     *)
-        echo "Usage: $0 [pe|systolic|softmax|decoder|all]"
+        echo "Usage: $0 [pe|systolic|softmax|decoder|bram|stream|all]"
         exit 1
         ;;
 esac

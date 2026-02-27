@@ -414,7 +414,16 @@ def test_systolic_array():
 # Module 3: Softmax Unit
 # ===========================================================================
 class SoftmaxUnit:
-    """Behavioral model of softmax_unit.sv"""
+    """Behavioral model of softmax_unit.sv (reciprocal LUT version)."""
+
+    # 32-entry reciprocal LUT: round(2^14 / (0.5 + k/64)), Q2.14 format
+    RECIP_LUT = [
+        32768, 31775, 30840, 29959, 29127, 28340, 27594, 26887,
+        26214, 25575, 24966, 24385, 23831, 23302, 22795, 22310,
+        21845, 21400, 20972, 20560, 20165, 19784, 19418, 19065,
+        18725, 18396, 18079, 17772, 17476, 17190, 16913, 16644,
+    ]
+
     def __init__(self, vec_len=D_HEAD):
         self.vec_len = vec_len
 
@@ -432,8 +441,60 @@ class SoftmaxUnit:
         else:
             return 0x0004
 
+    @staticmethod
+    def _clz16(val: int) -> int:
+        """Count leading zeros of a 16-bit unsigned value (0-15)."""
+        val = val & MASK_16
+        if val == 0:
+            return 15
+        for i in range(15, -1, -1):
+            if val & (1 << i):
+                return 15 - i
+        return 15
+
+    @staticmethod
+    def _compute_reciprocal(exp_sum: int) -> int:
+        """Compute 65536/exp_sum via LUT + Newton-Raphson.
+
+        Returns a 16-bit value r such that fp_mul(e, r) = (e << 8) / exp_sum.
+        Mirrors compute_reciprocal() in softmax_unit.sv exactly.
+        """
+        s = exp_sum & MASK_16
+        if s <= 1:
+            return 0x7FFF
+
+        # Step 1: CLZ and normalise to [0.5, 1.0) as Q0.16
+        lz = SoftmaxUnit._clz16(s)
+        s_norm = (s << lz) & MASK_16       # bit 15 is now 1
+
+        # Step 2: LUT lookup using bits [14:10]
+        lut_idx = (s_norm >> 10) & 0x1F
+        r0 = SoftmaxUnit.RECIP_LUT[lut_idx]
+
+        # Step 3: Newton-Raphson in Q2.14
+        # prod = (s_norm * r0) >> 16  (Q0.16 * Q2.14 -> 32-bit -> top 16 = Q2.14)
+        prod = ((s_norm & MASK_16) * (r0 & MASK_16))
+        prod16 = (prod >> 16) & MASK_16
+
+        # correction = 2.0_Q2.14 - prod16 = 32768 - prod16
+        correction = (32768 - prod16) & MASK_16
+
+        # r1 = (r0 * correction) >> 14
+        r1_wide = (r0 & MASK_16) * (correction & MASK_16)
+        r1 = (r1_wide >> 14) & MASK_16
+
+        # Step 4: Denormalise: result = r1 >> (14 - lz)
+        if lz > 14:
+            return 0x7FFF
+        rshift = 14 - lz
+        result = (r1 >> rshift) & MASK_16
+
+        if result > 0x7FFF:
+            return 0x7FFF
+        return result & MASK_16
+
     def compute(self, scores: List[int]) -> List[int]:
-        """Run the full softmax FSM."""
+        """Run the full softmax FSM (matches RTL exactly)."""
         assert len(scores) == self.vec_len
 
         # Stage 1: Find max
@@ -455,14 +516,14 @@ class SoftmaxUnit:
         for e in exp_vals:
             exp_sum += sign_extend_16(e)  # They should all be positive
 
-        # Stage 4: Normalize
+        # Stage 4: Reciprocal (replaces division)
+        recip = self._compute_reciprocal(exp_sum)
+
+        # Stage 5: Normalise via multiply
         probs = []
         for e in exp_vals:
             if exp_sum != 0:
-                # (e << FRAC_BITS) / exp_sum
-                numerator = sign_extend_16(e) << FRAC_BITS
-                p = numerator // exp_sum
-                probs.append(p & MASK_16)
+                probs.append(fp_mul(e, recip))
             else:
                 probs.append(0)
 

@@ -85,17 +85,75 @@ def fp_sat_add(a: int, b: int) -> int:
     return s & MASK_16
 
 def fp_inv_sqrt(x: int) -> int:
-    """Approximate 1/sqrt(x) in Q8.8 (matches RTL LUT)."""
+    """Compute 1/sqrt(x) in Q8.8 using CLZ + 32-entry LUT + Newton-Raphson.
+    Matches the RTL implementation in transformer_pkg.sv."""
+
     x_s = sign_extend_16(x)
     if x_s <= 0:
         return to_q88(1.0)
-    if x_s < 0x0100:
-        return 0x0400  # ~4.0
-    if x_s < 0x0400:
-        return 0x0200  # ~2.0
-    if x_s < 0x1000:
-        return 0x0100  # ~1.0
-    return 0x0080      # ~0.5
+    if x_s == 1:
+        return 0x1000  # 16.0 in Q8.8
+
+    xu = x_s & 0xFFFF
+
+    # Step 1: CLZ and normalise
+    lz = 0
+    for i in range(15, -1, -1):
+        if xu & (1 << i):
+            lz = 15 - i
+            break
+    else:
+        lz = 15
+    x_norm = (xu << lz) & 0xFFFF  # Q0.16, MSB is bit 15
+
+    # Step 2: rsqrt LUT (32 entries, Q2.14)
+    rsqrt_table = [
+        22992, 22646, 22315, 21999, 21695, 21404, 21124, 20855,
+        20596, 20346, 20106, 19873, 19649, 19431, 19221, 19018,
+        18821, 18630, 18444, 18264, 18090, 17920, 17755, 17594,
+        17438, 17285, 17137, 16992, 16851, 16714, 16579, 16448,
+    ]
+    lut_idx = (x_norm >> 10) & 0x1F
+    r0 = rsqrt_table[lut_idx]
+
+    # Step 3: Newton-Raphson: r1 = r0 * (3 - x_norm * r0^2) / 2
+    r0_sq = r0 * r0
+    r0_sq_16 = (r0_sq >> 14) & 0xFFFF
+    xr2 = x_norm * r0_sq_16
+    xr2_16 = (xr2 >> 16) & 0xFFFF
+    three_minus = max(0, 49152 - xr2_16)
+    r1_wide = r0 * three_minus
+    r1 = (r1_wide >> 15) & 0xFFFF
+
+    # Step 4: Denormalise using e = lz - 8
+    # r1 in Q2.14 approx 1/sqrt(x_norm_float) where x_norm_float = x_norm/2^16
+    # float_val = xu/2^8 = x_norm_float * 2^(8-lz)
+    # 1/sqrt(float_val) = 1/sqrt(x_norm_float) * 2^((lz-8)/2)
+    #                    = r1*2^(-14) * 2^((lz-8)/2)
+    # In Q8.8: result = r1 * 2^((lz-8)/2 - 6)
+    # For odd e: multiply r1 by sqrt(2) FIRST (preserves precision), then shift
+    e = lz - 8  # signed, range [-8, +7]
+    e_odd = (e % 2) != 0  # Python % always returns non-negative for positive divisor
+
+    if e_odd:
+        # Multiply r1 by sqrt(2) in full precision, then shift
+        r1_adj = (r1 * 23170) >> 14  # sqrt(2) in Q2.14 = 23170
+        shift_amt = 6 - (e - 1) // 2  # Python // rounds toward -inf
+    else:
+        r1_adj = r1
+        shift_amt = 6 - e // 2
+
+    if shift_amt >= 0:
+        result = r1_adj >> shift_amt
+    else:
+        result = r1_adj << (-shift_amt)
+
+    # Clamp
+    if result > 0x7FFF:
+        return 0x7FFF
+    if result == 0:
+        return 1
+    return result & MASK_16
 
 def mac_full_precision(a: int, b: int) -> int:
     """Full-precision MAC: a*b in 32-bit (matches PE accumulator)."""
@@ -614,11 +672,14 @@ class LayerNorm:
 
     def compute(self, x_in: List[int], gamma: List[int], beta: List[int]) -> List[int]:
         """Run LayerNorm FSM."""
-        # Stage 1: Mean
+        import math
+        log2_n = int(math.log2(self.vec_len))
+
+        # Stage 1: Mean (arithmetic right-shift for power-of-2 N)
         sum_acc = 0
         for i in range(self.vec_len):
             sum_acc += sign_extend_16(x_in[i])
-        mean_val = sum_acc // self.vec_len
+        mean_val = sum_acc >> log2_n  # Arithmetic right-shift
         mean_q = mean_val & MASK_16
 
         # Stage 2: Variance
@@ -630,7 +691,7 @@ class LayerNorm:
             c_sq = fp_mul(c, c)
             var_acc += sign_extend_16(c_sq)
 
-        var_val = var_acc // self.vec_len
+        var_val = var_acc >> log2_n  # Arithmetic right-shift
         var_q = var_val & MASK_16
 
         # inv_std = 1/sqrt(var + eps)

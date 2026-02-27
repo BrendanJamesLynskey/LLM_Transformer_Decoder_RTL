@@ -754,6 +754,7 @@ def test_decoder_integration():
     n_heads = 2
     d_head = d // n_heads  # 4
     d_ff = 16
+    max_seq = 8  # Reduced MAX_SEQ_LEN for test
 
     # Initialize identity-like weights
     wq = [[to_q88(0.25) if i == j else 0 for j in range(d)] for i in range(d)]
@@ -773,6 +774,7 @@ def test_decoder_integration():
     token = [to_q88(0.5) if i % 2 == 0 else to_q88(-0.5) for i in range(d)]
 
     ln = LayerNorm(vec_len=d)
+    sm = SoftmaxUnit(vec_len=max_seq)
     ffn_mod = FeedForward()
 
     # Step 1: LayerNorm 1
@@ -780,41 +782,93 @@ def test_decoder_integration():
     print(f"  LN1 out: {[f'{from_q88(v):.3f}' for v in ln1_out]}")
     res.check(any(v != 0 for v in ln1_out), "LN1 produces non-zero output")
 
-    # Step 2: Simplified attention (project Q, self-attend at pos 0)
-    # Q = LN1_out * Wq
+    # Step 2: Attention with softmax at position 0
+    # Project Q, K, V
     q_vec = []
-    for j in range(d):
-        acc = 0
-        for i in range(d):
-            acc += sign_extend_16(ln1_out[i]) * sign_extend_16(wq[i][j])
-        q_vec.append((acc >> FRAC_BITS) & MASK_16)
-
-    # K, V same as Q at position 0
     k_vec = []
     v_vec = []
     for j in range(d):
-        acc_k = 0
-        acc_v = 0
+        acc_q, acc_k, acc_v = 0, 0, 0
         for i in range(d):
+            acc_q += sign_extend_16(ln1_out[i]) * sign_extend_16(wq[i][j])
             acc_k += sign_extend_16(ln1_out[i]) * sign_extend_16(wk[i][j])
             acc_v += sign_extend_16(ln1_out[i]) * sign_extend_16(wv[i][j])
+        q_vec.append((acc_q >> FRAC_BITS) & MASK_16)
         k_vec.append((acc_k >> FRAC_BITS) & MASK_16)
         v_vec.append((acc_v >> FRAC_BITS) & MASK_16)
 
     print(f"  Q: {[f'{from_q88(v):.3f}' for v in q_vec]}")
     print(f"  K: {[f'{from_q88(v):.3f}' for v in k_vec]}")
 
-    # At position 0, attention is trivially softmax([score]) = [1.0]
-    # So attention output = V * Wo
+    # KV cache: position 0 holds our K, V
+    kv_cache_k = [[0]*d for _ in range(max_seq)]
+    kv_cache_v = [[0]*d for _ in range(max_seq)]
+    kv_cache_k[0] = list(k_vec)
+    kv_cache_v[0] = list(v_vec)
+    seq_pos = 0
+
+    # Compute attention scores per head, then apply softmax
+    NEG_INF = to_q88(-8.0)  # -8.0 in Q8.8 — within PWL exp range, avoids overflow
+    SCALE_Q88 = to_q88(0.25)  # 1/sqrt(d_head=4) = 0.5... but matches RTL: 0x0040
+
+    head_probs_all = []
+    for h in range(n_heads):
+        # Compute raw scores for this head
+        head_scores = []
+        for t in range(max_seq):
+            if t <= seq_pos:
+                dot = 0
+                for dd in range(d_head):
+                    qi = h * d_head + dd
+                    dot += sign_extend_16(q_vec[qi]) * sign_extend_16(kv_cache_k[t][qi])
+                score = fp_mul((dot >> FRAC_BITS) & MASK_16, SCALE_Q88)
+                head_scores.append(score)
+            else:
+                head_scores.append(NEG_INF)
+
+        # Apply softmax (matches RTL softmax_unit)
+        probs = sm.compute(head_scores)
+        head_probs_all.append(probs)
+        probs_f = [from_q88(p) for p in probs]
+        print(f"  Head {h} softmax probs[0:4]: {[f'{p:.4f}' for p in probs_f[:4]]}")
+
+    # At position 0, softmax over a single valid score should yield ~1.0
+    prob0_h0 = from_q88(head_probs_all[0][0])
+    res.check(prob0_h0 > 0.8,
+              f"Position 0: softmax([score]) ~ 1.0 (got {prob0_h0:.4f})")
+
+    # Future positions should be near zero
+    prob_future = from_q88(head_probs_all[0][1])
+    res.check(prob_future < 0.05,
+              f"Future position prob ~ 0.0 (got {prob_future:.4f})")
+
+    # Weighted sum: out_h = sum_t(probs[t] * V_h[t])
+    head_out = []
+    for h in range(n_heads):
+        hout = []
+        for dd in range(d_head):
+            ws = 0
+            for t in range(max_seq):
+                if t <= seq_pos:
+                    vi = h * d_head + dd
+                    ws += sign_extend_16(head_probs_all[h][t]) * sign_extend_16(kv_cache_v[t][vi])
+            hout.append((ws >> FRAC_BITS) & MASK_16)
+        head_out.append(hout)
+
+    # Concatenate and output projection
+    concat = []
+    for h in range(n_heads):
+        concat.extend(head_out[h])
+
     attn_out = []
     for j in range(d):
         acc = 0
         for i in range(d):
-            acc += sign_extend_16(v_vec[i]) * sign_extend_16(wo[i][j])
+            acc += sign_extend_16(concat[i]) * sign_extend_16(wo[i][j])
         attn_out.append((acc >> FRAC_BITS) & MASK_16)
 
     print(f"  Attn out: {[f'{from_q88(v):.3f}' for v in attn_out]}")
-    res.check(True, "Attention projection computed")
+    res.check(True, "Attention with softmax computed")
 
     # Step 3: Residual 1
     residual1 = [fp_sat_add(token[i], attn_out[i]) for i in range(d)]
@@ -845,10 +899,60 @@ def test_decoder_integration():
     res.check(output_energy > 0.01,
               f"Output has non-trivial energy ({output_energy:.4f})")
 
-    # Test sequential token (position 1)
+    # Test sequential token at position 1 (exercises softmax with 2 active positions)
+    print(f"\n  --- Sequential token at position 1 ---")
     token2 = [to_q88(1.0) if i % 3 == 0 else 0 for i in range(d)]
     ln1_out2 = ln.compute(token2, gamma, beta)
     res.check(any(v != 0 for v in ln1_out2), "Second token LN1 works")
+
+    # Project Q2, K2, V2
+    q2, k2, v2 = [], [], []
+    for j in range(d):
+        aq, ak, av = 0, 0, 0
+        for i in range(d):
+            aq += sign_extend_16(ln1_out2[i]) * sign_extend_16(wq[i][j])
+            ak += sign_extend_16(ln1_out2[i]) * sign_extend_16(wk[i][j])
+            av += sign_extend_16(ln1_out2[i]) * sign_extend_16(wv[i][j])
+        q2.append((aq >> FRAC_BITS) & MASK_16)
+        k2.append((ak >> FRAC_BITS) & MASK_16)
+        v2.append((av >> FRAC_BITS) & MASK_16)
+
+    # Update KV cache at position 1
+    kv_cache_k[1] = list(k2)
+    kv_cache_v[1] = list(v2)
+    seq_pos = 1
+
+    # Compute attention with softmax over 2 positions
+    head_probs2 = []
+    for h in range(n_heads):
+        head_scores2 = []
+        for t in range(max_seq):
+            if t <= seq_pos:
+                dot = 0
+                for dd in range(d_head):
+                    qi = h * d_head + dd
+                    dot += sign_extend_16(q2[qi]) * sign_extend_16(kv_cache_k[t][qi])
+                score = fp_mul((dot >> FRAC_BITS) & MASK_16, SCALE_Q88)
+                head_scores2.append(score)
+            else:
+                head_scores2.append(NEG_INF)
+        probs2 = sm.compute(head_scores2)
+        head_probs2.append(probs2)
+
+    # Softmax over 2 valid positions: both should have non-zero probability
+    p0 = from_q88(head_probs2[0][0])
+    p1 = from_q88(head_probs2[0][1])
+    p_sum = p0 + p1
+    print(f"  Head 0 softmax at pos 1: p[0]={p0:.4f}, p[1]={p1:.4f}, sum={p_sum:.4f}")
+    res.check(p0 > 0.01 and p1 > 0.01,
+              f"Both positions have non-zero probability")
+    res.check(abs(p_sum - 1.0) < 0.15,
+              f"Softmax probs sum ~ 1.0 (got {p_sum:.4f})")
+
+    # Future positions still near zero
+    p_future2 = from_q88(head_probs2[0][2])
+    res.check(p_future2 < 0.05,
+              f"Future position still ~ 0.0 (got {p_future2:.4f})")
 
     return res.summary("Decoder Integration")
 

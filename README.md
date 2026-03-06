@@ -1,798 +1,227 @@
 # LLM Transformer Decoder RTL Accelerator
 
-A synthesizable SystemVerilog implementation of a **Transformer Decoder block** optimized for LLM inference, featuring BRAM-backed weight storage, reciprocal-LUT softmax, KV-cache, and comprehensive verification.
+A synthesizable **SystemVerilog** implementation of a Transformer Decoder block, optimized for LLM inference. Includes a full verification suite — behavioural Python golden model, SystemVerilog testbenches, and CocoTB testbenches — with 83 passing tests and no external Python dependencies for behavioural verification.
 
-## Architecture Overview
+---
+
+## Architecture
 
 ```
-                    ┌──────────────────────────────────────────┐
-  wl_en/addr/data ──►  transformer_decoder_top                 │
-                    │                                          │
-                    │  ┌─────────────────────────────────────┐ │
-  INIT_FILE ──────────►│  Weight BRAMs (12 instances)         │ │
-                    │  │  Wq Wk Wv Wo W1 W2 b1 b2 LN γ/β   │ │
-                    │  └──────────────┬──────────────────────┘ │
-                    │                 │ register arrays         │
-                    │  ┌──────────────▼──────────────────────┐ │
-  token_emb ────────►  │  transformer_decoder                 │ │
-                    │  │                                      │ │
-                    │  │  ──► [LN1] ──► [Multi-Head Attn] ◄──┤ │
-                    │  │  │              │ ┌────────────┐     │ │
-                    │  │  │              ├─┤ softmax    │     │ │
-                    │  │  │              │ │ (LUT+NR)   │     │ │
-                    │  │  │              │ └────────────┘     │ │
-                    │  │  └──── (+) ◄────┘                    │ │
-                    │  │         │                             │ │
-                    │  │  [LN2] ──► [FFN] ──► (+) ──► out_emb│ │
-                    │  └──────────────────────────────────────┘ │
-                    │                                          │
-                    │  ┌──────────────────────────────────────┐ │
-                    │  │  KV-Cache BRAMs (2× dual-port)       │ │
-                    │  │  K: 128×64  V: 128×64                │ │
-                    │  └──────────────────────────────────────┘ │
-                    └──────────────────────────────────────────┘
+token_emb ──► [LayerNorm 1] ──► [Multi-Head Attention] ──►(+)──► [LayerNorm 2] ──► [Feed-Forward] ──►(+)──► out_emb
+                                                            ▲  Residual 1                                ▲  Residual 2
+                  └───────────────────────────────────────────┘              └───────────────────────────┘
 ```
 
-This is a **pre-norm** decoder architecture (GPT-2/LLaMA style) implementing autoregressive inference with BRAM-backed weights, KV-cache, division-free softmax and LayerNorm via reciprocal LUT + Newton-Raphson.
+This is a **pre-norm decoder** (GPT-2/LLaMA style): LayerNorm is applied before each sub-layer, residual connections bypass each sub-layer, and inference is autoregressive with KV-cache support.
+
+---
 
 ## Key Parameters
 
-| Parameter | Default | Description |
-|-----------|---------|-------------|
-| `D_MODEL` | 64 | Embedding dimension |
-| `N_HEADS` | 4 | Attention heads |
-| `D_HEAD` | 16 | Per-head dimension (D_MODEL / N_HEADS) |
-| `D_FF` | 256 | FFN inner dimension (4× model) |
-| `MAX_SEQ_LEN` | 128 | Maximum sequence length |
-| `DATA_WIDTH` | 16 | Fixed-point width (Q8.8) |
-| `ACC_WIDTH` | 32 | Accumulator width for MAC operations |
-| `PE_ROWS` | 4 | Systolic array rows |
-| `PE_COLS` | 4 | Systolic array columns |
+| Parameter    | Default | Description                        |
+|--------------|---------|------------------------------------|
+| `D_MODEL`    | 64      | Embedding / model dimension        |
+| `N_HEADS`    | 4       | Number of attention heads          |
+| `D_HEAD`     | 16      | Per-head dimension (`D_MODEL / N_HEADS`) |
+| `D_FF`       | 256     | FFN inner dimension (4 × D_MODEL)  |
+| `MAX_SEQ_LEN`| 128     | Maximum sequence / context length  |
+| `DATA_WIDTH` | 16      | Fixed-point word width (Q8.8)      |
 
-## Module Hierarchy
+All parameters are centralised in `rtl/transformer_pkg.sv`. Scaling up requires only changing values there.
 
-### Original Architecture (register-array bridge)
-
-```
-transformer_decoder_top          (BRAM-backed synthesis top-level)
-├── bram_sp ×12                  (Weight/bias/parameter storage)
-├── kv_cache_bram ×2             (K and V caches)
-│   └── bram_dp                  (True dual-port BRAM)
-└── transformer_decoder          (Decoder compute core)
-    ├── layer_norm ×2            (Pre-attention & pre-FFN normalisation)
-    ├── multi_head_attention     (Causal multi-head self-attention)
-    │   └── softmax_unit         (Reciprocal-LUT softmax, time-multiplexed)
-    ├── feed_forward             (Two-layer FFN with ReLU)
-    ├── systolic_array           (Matrix multiply engine)
-    │   └── processing_element   (Single MAC unit)
-    └── transformer_pkg          (Parameters, types, FP utilities)
-```
-
-### Streaming Architecture (direct BRAM access, no register arrays)
-
-```
-transformer_decoder_top_stream   (Streaming BRAM-backed top-level)
-├── bram_sp ×12                  (Weight/bias/parameter storage)
-├── kv_cache_bram ×2             (K and V caches, element-level read)
-│   └── bram_dp                  (True dual-port BRAM)
-└── transformer_decoder_stream   (Streaming decoder core)
-    ├── layer_norm ×2            (Pre-attention & pre-FFN normalisation)
-    ├── multi_head_attention_stream (Streaming attention, BRAM address/data)
-    │   └── softmax_unit         (Reciprocal-LUT softmax, time-multiplexed)
-    ├── feed_forward_stream      (Streaming FFN, BRAM address/data)
-    ├── systolic_array           (Matrix multiply engine)
-    │   └── processing_element   (Single MAC unit)
-    └── transformer_pkg          (Parameters, types, FP utilities)
-```
-
-The streaming architecture eliminates ~49K × 16-bit = 789K flip-flops by reading weights directly from BRAM via address/data interfaces. Compute modules generate BRAM addresses one cycle ahead to account for read latency. Dot products are fully serialised (one MAC per cycle) instead of using combinational for-loops. See the [Streaming Weight Architecture](#streaming-weight-architecture) section for details.
-
-Utility modules (not instantiated in top, available for future use):
-
-```
-weight_bram                      (2D weight matrix w/ column-read FSM)
-```
-
-## Weight Initialisation and Loading
-
-Weights can be loaded in two ways:
-
-**At synthesis/simulation start** — pass hex file paths to the `INIT_FILE` parameters of `transformer_decoder_top`:
-
-```systemverilog
-transformer_decoder_top #(
-  .WQ_INIT("weights/wq.hex"),
-  .WK_INIT("weights/wk.hex"),
-  // ... etc
-) u_top ( ... );
-```
-
-Hex files contain one 16-bit value per line in row-major order.
-
-**At runtime** — use the weight-loading bus to write individual elements:
-
-```
-wl_en   = 1;
-wl_addr = 16'h0042;  // Wq[1][2] (row 1, col 2 = 1*64+2 = 66 = 0x42)
-wl_data = 16'h0100;  // 1.0 in Q8.8
-```
-
-The unified address space maps all 49,344 weight words:
-
-| Region | Base | Size | Dimensions |
-|--------|------|------|------------|
-| Wq | 0x0000 | 4096 | 64 × 64 |
-| Wk | 0x1000 | 4096 | 64 × 64 |
-| Wv | 0x2000 | 4096 | 64 × 64 |
-| Wo | 0x3000 | 4096 | 64 × 64 |
-| FFN W1 | 0x4000 | 16384 | 64 × 256 |
-| FFN W2 | 0x8000 | 16384 | 256 × 64 |
-| LN1 γ | 0xC000 | 64 | 64 |
-| LN1 β | 0xC040 | 64 | 64 |
-| LN2 γ | 0xC080 | 64 | 64 |
-| LN2 β | 0xC0C0 | 64 | 64 |
-| FFN b1 | 0xC100 | 256 | 256 |
-| FFN b2 | 0xC200 | 64 | 64 |
-
-## BRAM Architecture
-
-### bram_sp — Generic Single-Port BRAM
-
-Parameterised by `DATA_WIDTH`, `DEPTH`, and `INIT_FILE`. Synchronous read-first behavior with 1-cycle read latency. Synthesises to Xilinx BRAM36 / Intel M20K primitives.
-
-### bram_dp — Generic True Dual-Port BRAM
-
-Two fully independent read/write ports. Used for KV-cache where port A writes new K/V vectors and port B reads during attention scoring.
-
-### kv_cache_bram — KV-Cache Controller
-
-Wraps `bram_dp` for a MAX_SEQ_LEN × D_MODEL cache. Provides a vector-write interface (auto-incrementing FSM writes all D_MODEL elements) and element-level random reads at `(position, dimension)`.
-
-### weight_bram — 2D Weight Matrix with Column-Read FSM
-
-Wraps `bram_sp` to store a ROWS × COLS matrix. Provides a column-read interface matching the compute modules' access pattern: request column index, receive the full column in a registered buffer after ROWS+1 cycles.
-
-## Attention Pipeline
-
-```
-Attention(Q, K, V) = softmax(Q·Kᵀ / √d_k) · V
-```
-
-## Streaming Weight Architecture
-
-The project provides two top-level variants with different weight access strategies:
-
-### Original: Register-Array Bridge (`transformer_decoder_top`)
-
-The inner compute modules (`multi_head_attention`, `feed_forward`) accept full weight matrices as combinational array ports. The top-level copies all 49,344 weight words from BRAMs into register arrays, then drives the decoder's array ports from these registers. This is simple but requires ~789K flip-flops just for weight storage.
-
-### Streaming: Direct BRAM Access (`transformer_decoder_top_stream`)
-
-The streaming compute modules (`multi_head_attention_stream`, `feed_forward_stream`) read weights directly from BRAM via address/data interfaces. The top-level muxes each BRAM's read port between the weight-loading bus and the compute read address. No register arrays are needed for the large weight matrices.
-
-**Key design choices:**
-
-**Address pipelining.** BRAM has 1-cycle read latency. Each compute module's FSM generates the next BRAM address one cycle before the data is needed. A dedicated `S_*_ADDR` state pre-issues the first address, then the main compute state processes arriving data while simultaneously requesting the next address.
-
-**Serialised dot products.** Where the original computes full D_MODEL-element dot products in a single cycle (combinational for-loop with 64 parallel multipliers), the streaming variant performs one multiply-accumulate per cycle. The QKV projection for one output dimension takes D_MODEL cycles (64) instead of 1, but uses only 3 multipliers instead of 192.
-
-**Three-BRAM lockstep.** During QKV projection, Wq, Wk, and Wv BRAMs share the same read address (`wqkv_rd_addr`) and are read simultaneously. Three separate accumulators run in parallel, producing Q, K, V for one output dimension in D_MODEL cycles.
-
-**Latency vs area comparison (per-token at seq_pos=0):**
-
-| Metric | Original | Streaming | Change |
-|--------|----------|-----------|--------|
-| QKV projection | ~64 cycles (1/dim × 64 dims) | ~4,160 cycles (65/dim × 64 dims) | ~65× slower |
-| Output projection | ~64 cycles | ~4,160 cycles | ~65× slower |
-| FFN Linear1 | ~256 cycles | ~16,896 cycles | ~66× slower |
-| FFN Linear2 | ~64 cycles | ~16,448 cycles | ~257× slower |
-| Softmax (unchanged) | ~2,568 cycles | ~2,568 cycles | Same |
-| Total pipeline | ~3,200 cycles | ~45,000 cycles | ~14× slower |
-| Weight registers | 49,344 × 16-bit = 789K FFs | 320 × 16-bit = 5K FFs | **99.4% reduction** |
-| Weight multipliers | ~192 combinational | 3 (QKV) + 1 (Wo) + 2 (FFN) = 6 | **97% reduction** |
-| DSP48 usage | ~150 | ~10 | **93% reduction** |
-
-The streaming variant trades latency for area. For small FPGAs where 789K FFs are unavailable, or for designs targeting minimum area, the streaming architecture makes the decoder feasible. For high-throughput applications, the original architecture is preferred.
-
-**Shared interface.** Both variants use the same external interface: `wl_en`/`wl_addr`/`wl_data` for weight loading, `start`/`token_emb`/`seq_pos` for inference, `out_emb`/`valid` for output. Switching between them requires only changing the top-level module instantiation.
-
-| Stage | Operation | Cycles (seq_pos=127) |
-|-------|-----------|---------------------|
-| `S_PROJ_QKV` | Project input → Q, K, V | 64 |
-| `S_WRITE_CACHE` | Store K, V in KV-cache | 1 |
-| `S_SCORE` | Compute Q·K^T / √d_k | 512 |
-| `S_SOFTMAX_PREP` | Pad scores with −8.0 (causal mask) | 1 per head |
-| `S_SOFTMAX_RUN` | Softmax: find-max → exp → sum → reciprocal → multiply | ~641 per head |
-| `S_SOFTMAX_STORE` | Copy probabilities | 1 per head |
-| `S_WEIGHTED_SUM` | Probability-weighted sum of V | 4 |
-| `S_OUTPUT_PROJ` | Project through Wo | 64 |
-| **Total** | | **~3,214** |
-
-### Softmax (Division-Free)
-
-The softmax normalisation step `probs[i] = exp[i] / Σexp` is implemented without a hardware divider:
-
-1. **32-entry reciprocal LUT** (Q2.14) indexed by the top 5 mantissa bits of the sum after CLZ normalisation to [0.5, 1.0)
-2. **One Newton-Raphson iteration**: `r₁ = r₀ × (2 − sum_norm × r₀)`, doubling precision to ~12 bits
-3. **Denormalising shift**: `recip = r₁ >> (14 − lz)` to produce `65536 / exp_sum`
-4. **Multiply**: `probs[i] = fp_mul(exp[i], recip)` using the standard Q8.8 multiplier
-
-This replaces the non-synthesizable `/` operator with a 512-bit ROM, two 16×16 multipliers, and a barrel shifter. Max error vs exact division: ±1 LSB (0.0039).
+---
 
 ## Fixed-Point Arithmetic
 
-All computation uses **Q8.8 signed fixed-point** (16-bit) with 32-bit accumulators:
+All computation uses **Q8.8 signed fixed-point** (16-bit) with 32-bit accumulation for MAC operations.
 
-| Property | Value |
-|----------|-------|
-| Format | 1 sign + 7 integer + 8 fractional bits |
-| Range | −128.0 to +127.996 |
-| Resolution | 1/256 ≈ 0.0039 (~48 dB SQNR) |
-| Multiply | 16×16 → 32-bit product, arithmetic right-shift by 8 |
-| Accumulate | Full 32-bit precision, truncated on output |
-| Addition | Saturating (clamps to representable range) |
-| Softmax exp | 4-segment piecewise-linear over [−8, 0] |
-| Softmax 1/Σ | 32-entry reciprocal LUT + Newton-Raphson |
-| LayerNorm ÷N | Arithmetic right-shift (N is power of 2) |
-| LayerNorm 1/√x | 32-entry rsqrt LUT + Newton-Raphson |
+| Property    | Value                                        |
+|-------------|----------------------------------------------|
+| Format      | Q8.8 signed, 16-bit                          |
+| Range       | −128.0 to +127.996                           |
+| Resolution  | 1/256 ≈ 0.0039                               |
+| Accumulator | 32-bit (full-precision MAC, truncated on output) |
+| Softmax     | Piecewise-linear exponential approximation   |
+| LayerNorm   | 32-entry RSqrt LUT with Newton–Raphson refinement; division replaced by right-shift |
+
+Eliminating floating-point units drastically reduces area and power. 16×16-bit multipliers map directly to FPGA DSP48 primitives.
+
+---
+
+## Module Hierarchy
+
+```
+transformer_decoder          ← Top-level decoder block
+├── layer_norm               ← Pre-attention & pre-FFN normalisation
+├── multi_head_attention     ← Causal multi-head self-attention with KV-cache
+├── feed_forward             ← Two-layer FFN with ReLU activation
+├── softmax_unit             ← PWL-approximate softmax
+├── systolic_array           ← Matrix-multiply engine
+│   └── processing_element   ← Single MAC unit (systolic PE)
+└── transformer_pkg          ← Parameters, types, FP utility functions
+```
+
+---
 
 ## Project Structure
 
 ```
 ├── rtl/
-│   ├── transformer_pkg.sv                # Parameters, types, FP functions
-│   ├── processing_element.sv             # Systolic PE (MAC unit)
-│   ├── systolic_array.sv                 # NxN systolic matrix multiply
-│   ├── softmax_unit.sv                   # Reciprocal-LUT softmax
-│   ├── layer_norm.sv                     # Layer normalisation
-│   ├── multi_head_attention.sv           # Multi-head attention (array ports)
-│   ├── multi_head_attention_stream.sv    # Multi-head attention (BRAM streaming)
-│   ├── feed_forward.sv                   # Position-wise FFN (array ports)
-│   ├── feed_forward_stream.sv            # Position-wise FFN (BRAM streaming)
-│   ├── transformer_decoder.sv            # Decoder core (array ports)
-│   ├── transformer_decoder_stream.sv     # Decoder core (BRAM streaming)
-│   ├── bram_sp.sv                        # Generic single-port BRAM
-│   ├── bram_dp.sv                        # Generic true dual-port BRAM
-│   ├── weight_bram.sv                    # 2D weight matrix w/ column-read FSM
-│   ├── kv_cache_bram.sv                  # KV-cache controller (dual-port)
-│   ├── transformer_decoder_top.sv        # BRAM top-level (register bridge)
-│   └── transformer_decoder_top_stream.sv # BRAM top-level (direct streaming)
+│   ├── transformer_pkg.sv        # Package: parameters, types, FP functions
+│   ├── processing_element.sv     # Systolic PE (MAC unit)
+│   ├── systolic_array.sv         # N×N systolic matrix multiply
+│   ├── softmax_unit.sv           # PWL softmax approximation
+│   ├── layer_norm.sv             # Layer normalisation
+│   ├── multi_head_attention.sv   # Multi-head causal attention + KV-cache
+│   ├── feed_forward.sv           # Position-wise FFN (ReLU)
+│   └── transformer_decoder.sv    # Top-level decoder block
 ├── tb/
-│   ├── sv/
+│   ├── sv/                       # SystemVerilog testbenches
 │   │   ├── tb_processing_element.sv
 │   │   ├── tb_systolic_array.sv
 │   │   ├── tb_softmax.sv
-│   │   ├── tb_bram.sv
-│   │   ├── tb_transformer_decoder.sv
-│   │   └── tb_transformer_decoder_stream.sv
-│   └── cocotb/
+│   │   └── tb_transformer_decoder.sv
+│   └── cocotb/                   # Python CocoTB testbenches
 │       ├── test_processing_element.py
 │       ├── test_softmax.py
 │       ├── Makefile.pe
 │       └── Makefile.softmax
 ├── scripts/
-│   ├── run_sim.sh                  # Simulation runner (iverilog)
-│   ├── verify_behavioral.py        # Bit-accurate behavioural verification (54 tests)
-│   └── lint_check.py               # RTL structural lint checker
+│   ├── run_sim.sh                # Master simulation runner (iverilog)
+│   ├── verify_behavioral.py      # Bit-accurate behavioural verification (54 tests)
+│   └── lint_check.py             # RTL structural lint checker
 ├── docs/
-│   ├── report.md
-│   └── report.pdf
+│   ├── report.md                 # Technical report (Markdown)
+│   └── report.pdf                # Technical report (PDF)
 └── README.md
 ```
 
+---
+
 ## Verification
 
-The project has three verification layers: a bit-accurate Python model (54 tests), structural RTL lint, and iverilog RTL simulation (6 testbenches, 29 tests).
+The project has **83 passing tests** across three verification tiers.
 
-### Behavioural Model (Python — no simulator needed)
+### Tier 1 — Behavioural Verification (no simulator required)
+
+A bit-accurate Python model mirrors the RTL using identical Q8.8 arithmetic. Requires only **Python 3.8+** with no additional dependencies.
 
 ```bash
 python3 scripts/verify_behavioral.py
 ```
 
-**54 tests**, all passing, across every module:
+Runs **54 behavioural tests** with golden-model comparison:
 
-| Module | Tests | Key Checks |
-|--------|-------|------------|
-| Fixed-Point Utilities | 16 | Roundtrip, multiply, saturating add, edge values |
-| Processing Element | 9 | MAC, forwarding, clear, 20-op randomised golden model |
-| Systolic Array | 8 | Single element, 2×2 matmul `[[19,22],[43,50]]`, clear |
-| Softmax Unit | 8 | Uniform, dominant, ordering, sum≈1.0, back-to-back (reciprocal LUT) |
-| Layer Normalisation | 5 | Constant→zero, symmetry, gamma/beta, centering |
-| Feed-Forward Network | 4 | ReLU zeroing, bias propagation |
-| Decoder Integration | 12 | Full pipeline w/ softmax, causal mask, KV-cache, 2-token sequential |
+| Module                  | Tests | Key Checks                                        |
+|-------------------------|-------|---------------------------------------------------|
+| Fixed-Point Utilities   | 16    | Roundtrip, multiply, saturating add               |
+| Processing Element      | 9     | MAC, forwarding, clear, 20-op random golden model |
+| Systolic Array          | 8     | Single element, 2×2 matmul `[[19,22],[43,50]]`, clear |
+| Softmax Unit            | 8     | Uniform, dominant, ordering, sum≈1.0, back-to-back |
+| Layer Normalisation     | 5     | Constant→zero, symmetry, γ/β scaling, centering  |
+| Feed-Forward Network    | 4     | ReLU zeroing, bias propagation                    |
+| Decoder Integration     | 4     | Full pipeline, KV-cache, 2-token sequential       |
 
-The softmax tests validate the reciprocal-LUT normalisation matches exact division to within ±1 LSB. The decoder integration tests verify single-position probability ≈ 0.90, multi-position sum ≈ 0.95, and future-position masking < 0.01.
+### Tier 2 — RTL Simulation (requires iverilog)
 
-### RTL Lint
+**29 RTL simulation tests** via SystemVerilog testbenches:
+
+```bash
+# Run all RTL tests
+./scripts/run_sim.sh all
+
+# Run individual module tests
+./scripts/run_sim.sh pe         # Processing Element
+./scripts/run_sim.sh systolic   # Systolic Array
+./scripts/run_sim.sh softmax    # Softmax Unit
+./scripts/run_sim.sh decoder    # Full Decoder (integration)
+```
+
+### Tier 3 — CocoTB (Python-driven RTL testbenches)
+
+```bash
+cd tb/cocotb
+
+make -f Makefile.pe       # Processing Element
+make -f Makefile.softmax  # Softmax Unit
+```
+
+### Structural Lint
 
 ```bash
 python3 scripts/lint_check.py
 ```
 
-Validates all 17 RTL files: module balance, package imports, reset patterns, instantiation resolution. Reports 0 errors, 5 warnings (BRAM blocks intentionally lack reset in their memory `always_ff` — standard practice for inference to FPGA BRAM primitives).
+Checks module/endmodule balance, package imports, reset patterns, and cross-file instantiation resolution across all 8 RTL files.
 
-### RTL Simulation (iverilog)
+---
 
-#### Prerequisites
+## Prerequisites
 
-- **Python** ≥ 3.8
-- **Icarus Verilog** ≥ 12.0
-
-```bash
-sudo apt-get install iverilog   # Ubuntu/Debian
-brew install icarus-verilog      # macOS
-```
-
-#### Test Results
-
-| Testbench | Compile | Result |
-|-----------|---------|--------|
-| tb_processing_element | ✓ | **6/6 PASS** |
-| tb_systolic_array | ✓ | **4/4 PASS** |
-| tb_softmax | ✓ | **4/4 PASS** |
-| tb_bram | ✓ | **8/8 PASS** |
-| tb_transformer_decoder | ✓ | **4/4 PASS** |
-| tb_transformer_decoder_stream | ✓ | **3/3 PASS** |
-| Full hierarchy (17 RTL files) | ✓ | **Compiles clean** |
-
-**Total: 83/83 tests pass** (54 behavioural + 29 RTL simulation).
-
-All module ports use packed arrays (`logic signed [N-1:0][W-1:0]`) for 1D vector signals, ensuring correct value propagation in iverilog. Multi-dimensional weight matrices remain as unpacked arrays (set before simulation start).
-
-#### Running Tests
+| Tool | Version | Purpose |
+|------|---------|---------|
+| Python | ≥ 3.8 | Behavioural verification (no extra packages needed) |
+| Icarus Verilog | ≥ 12.0 | RTL simulation (SystemVerilog 2012) |
+| CocoTB | ≥ 1.8 | Python-driven RTL testbenches |
 
 ```bash
-# All tests via master script
-./scripts/run_sim.sh all
+# Ubuntu / Debian
+sudo apt-get install iverilog
+pip install cocotb
 
-# Individual testbenches
-./scripts/run_sim.sh pe         # Processing Element
-./scripts/run_sim.sh systolic   # Systolic Array
-./scripts/run_sim.sh softmax    # Softmax Unit
-./scripts/run_sim.sh bram       # BRAM & KV-Cache
-./scripts/run_sim.sh decoder    # Original decoder
-./scripts/run_sim.sh stream     # Streaming decoder
-
-# Streaming decoder integration (manual)
-iverilog -g2012 -o sim_stream \
-  rtl/transformer_pkg.sv rtl/bram_sp.sv rtl/bram_dp.sv \
-  rtl/kv_cache_bram.sv rtl/processing_element.sv rtl/systolic_array.sv \
-  rtl/softmax_unit.sv rtl/layer_norm.sv \
-  rtl/multi_head_attention_stream.sv rtl/feed_forward_stream.sv \
-  rtl/transformer_decoder_stream.sv rtl/transformer_decoder_top_stream.sv \
-  tb/sv/tb_transformer_decoder_stream.sv && vvp sim_stream
+# macOS
+brew install icarus-verilog
+pip install cocotb
 ```
 
-### CocoTB Tests
+---
 
-```bash
-cd tb/cocotb
-make -f Makefile.pe        # Processing Element
-make -f Makefile.softmax   # Softmax
-```
+## Design Rationale
 
-## Design Decisions
+### Q8.8 Fixed-Point
 
-### Why Q8.8 Fixed-Point?
-Integer-only datapaths eliminate floating-point units, reducing area and power. Q8.8 keeps multipliers at 16×16 bits — ideal for FPGA DSP48 blocks.
+Integer-only datapaths eliminate floating-point units, substantially reducing area and power. Q8.8 provides sufficient dynamic range for small-model inference while keeping multipliers at 16×16 bits — a natural fit for FPGA DSP48 blocks.
 
-### Why Reciprocal LUT Instead of Division?
-Hardware dividers are either non-synthesizable (Verilog `/`) or require multi-cycle iterative circuits. Both the softmax normalisation (1/Σexp) and the LayerNorm inverse square root (1/√var) use the same architectural pattern: a 32-entry LUT indexed by CLZ-normalised mantissa bits, followed by one Newton-Raphson refinement iteration. Each computes in a single cycle using only a small ROM, two multipliers, and a barrel shifter. The LayerNorm mean/variance divisions by VEC_LEN use arithmetic right-shift since VEC_LEN is a power of 2. No runtime division operators remain in the compute datapath.
+### Systolic Array
 
-### Why BRAM for Weights?
-Combinational array ports (the original design) are fine for simulation but synthesise to massive LUT-based register files. BRAM storage reduces this from ~800K flip-flops to ~100 KB of block RAM (a fraction of even a small FPGA). The `INIT_FILE` parameter enables preloading from hex files at synthesis.
+The systolic architecture maximises data reuse: each operand traverses N PEs, yielding O(N²) compute with O(N) I/O bandwidth. This maps directly to the matrix multiplications that dominate transformer inference.
 
-### Why Time-Multiplexed Softmax?
-A single softmax_unit shared across 4 heads saves ~3× area at the cost of 4× latency. Parallelising to N_HEADS instances is a one-line change when latency is the bottleneck.
+### Pre-Norm
 
-### Why Pre-Norm?
-Pre-norm (LayerNorm before attention/FFN) matches GPT-2, LLaMA, and most modern LLMs. It is more stable and produces identical results at inference time.
+LayerNorm before each sub-layer (rather than after) improves training stability and matches the architecture used by GPT-2, LLaMA, and most modern decoder-only LLMs. At inference, results are equivalent.
 
-### KV-Cache Strategy
-Only the current token's Q is computed fresh; K and V from all prior positions are cached in dual-port BRAM, reducing per-token attention compute from O(n²·d) to O(n·d).
+### KV-Cache
 
-## Use Cases and Applicability
+During autoregressive generation only the current token's **Q** is computed fresh; **K** and **V** from all prior positions are cached. This reduces per-token attention compute from O(n²·d) to O(n·d).
 
-### Where This Design Fits
+### LayerNorm Implementation
 
-This accelerator implements a **single decoder layer for autoregressive inference** — the core primitive of GPT-style text generation. Understanding where it applies (and where it doesn't) helps frame its value.
+Standard LayerNorm requires a reciprocal square root, which is expensive in integer logic. This design replaces the division with a right-shift and uses a 32-entry RSqrt LUT with a single Newton–Raphson refinement step, providing sufficient accuracy for Q8.8 precision without a hardware divider.
 
-### Inference — Primary Target
+---
 
-This design is purpose-built for **LLM inference on edge and embedded FPGA platforms**. Several architectural choices reflect this:
+## Architectural Variants
 
-**Weight-stationary dataflow.** Weights are loaded once into BRAM and reused across every token. There is no gradient storage, no optimizer state, no backward pass — the entire memory budget goes to weights and KV-cache. This is the fundamental difference between inference and training hardware.
+Two area/throughput trade-off configurations are documented in `docs/report.md`:
 
-**KV-cache with incremental updates.** Each new token writes one K/V vector and reads all prior positions. The dual-port BRAM design (port A writes, port B reads) supports this single-token-at-a-time pattern directly. Production inference engines like vLLM and TensorRT-LLM use exactly this pattern, managing cache memory across requests.
+| Variant | Description | Register count |
+|---------|-------------|----------------|
+| High-throughput | Register-bridge architecture; maximises pipelining | Baseline |
+| Minimum-area | Streaming architecture; weight/activation reuse | −99.4% registers |
 
-**Fixed-point arithmetic.** Q8.8 quantisation reduces multiplier area to single DSP48 slices. Post-training quantisation to INT8 or INT4 is standard practice in production inference (GPTQ, AWQ, SmoothQuant). This design demonstrates the hardware-side implementation of quantised inference.
-
-**Low-latency single-token generation.** The design processes one token per pipeline pass (~3,200 cycles at 128 sequence length), targeting interactive generation where latency per token matters more than throughput.
-
-Concrete deployment scenarios include on-device language models for IoT/robotics (running small transformer models entirely on FPGA with no host CPU dependency), FPGA inference cards for data centre offload (Xilinx Alveo or Intel Stratix with multiple decoder layers), and custom ASIC prototyping (using the RTL as a starting point for a tape-out targeting inference workloads).
-
-### Low-Power and Edge Deployment — Strong Fit
-
-The design is well-suited to **power-constrained environments** for several reasons:
-
-**No external memory bandwidth.** With weights in on-chip BRAM (~128 KB), inference requires zero DRAM accesses for a small model. DRAM access typically dominates power consumption in neural network inference — eliminating it can reduce power by 10–100×. For the current D_MODEL=64 configuration, the entire model fits on-chip.
-
-**Clock gating opportunity.** The FSM-driven sequential architecture naturally enables clock gating: only the active module draws dynamic power in any given cycle. The systolic array, softmax, LayerNorm, and FFN are never active simultaneously.
-
-**Deterministic latency.** Fixed pipeline depth with no data-dependent branching means power draw is predictable and consistent — important for battery-powered or energy-harvesting applications.
-
-**Scaling consideration.** Production LLMs (7B+ parameters) far exceed on-chip BRAM capacity. For larger models, this architecture would require an external memory interface (HBM/DDR) with a weight-streaming controller, at which point power advantages diminish. The sweet spot is small specialised models (1M–50M parameters) that fit entirely on-chip.
-
-### Training — Not Applicable
-
-This design **does not support training** and is not easily adapted for it. The fundamental gaps are:
-
-**No backward pass.** Training requires computing gradients through every layer via backpropagation. This needs either: (a) storing all intermediate activations for the backward pass (enormous memory), or (b) recomputation (doubling latency). Neither is implemented.
-
-**No floating-point support.** Training is highly sensitive to numerical precision — modern training uses BF16 or FP32 accumulation. Q8.8 fixed-point lacks the dynamic range for gradient computation, where values can span many orders of magnitude. Straight-through estimators and loss scaling can partially compensate, but Q8.8 is too narrow for stable training.
-
-**No weight update logic.** Training requires an optimiser (SGD, Adam) that reads gradients, maintains momentum/variance state, and writes updated weights. This is an entirely separate datapath.
-
-**No batch support.** Training throughput depends on processing many samples simultaneously. This design processes one token at a time with no batching.
-
-Training accelerators (GPU, TPU, Cerebras WSE) are architecturally very different: they prioritise memory bandwidth, floating-point throughput, and all-reduce communication over the low-latency single-inference path optimised here.
-
-### Prefill vs Decode Phases
-
-Modern LLM serving splits inference into two phases with different computational profiles:
-
-**Prefill (prompt processing)** is compute-bound — it processes all prompt tokens in parallel through matrix multiplications. This design's sequential token-by-token architecture is suboptimal for prefill; a batched matrix engine would be more efficient.
-
-**Decode (token generation)** is memory-bandwidth-bound — it generates one token at a time, reading the full KV-cache each step. This is exactly what the design optimises for: single-token processing with on-chip KV-cache reuse.
-
-A production system would pair this decode engine with a separate prefill accelerator, or add a batch-mode to the systolic array for prefill.
-
-### Summary
-
-| Scenario | Fit | Notes |
-|----------|-----|-------|
-| Edge/FPGA inference (small models) | ★★★★★ | Primary design target. On-chip weights, low power, deterministic latency |
-| ASIC inference prototyping | ★★★★☆ | Proven architecture; add memory interfaces for larger models |
-| Low-power / battery-constrained | ★★★★☆ | Zero DRAM for small models; FSM enables clock gating |
-| Data centre decode engine | ★★★☆☆ | Architecture sound; needs HBM interface and multi-layer stacking |
-| Prefill / prompt processing | ★★☆☆☆ | Sequential design; would need batch-mode systolic operation |
-| Training | ☆☆☆☆☆ | Fundamentally different requirements (FP, backward pass, optimiser) |
-| Fine-tuning / LoRA | ★☆☆☆☆ | Could serve as frozen forward-pass engine with external adapter logic |
+---
 
 ## Extending the Design
 
-**Streaming weight access**: Refactor compute modules to use address/data interfaces instead of array ports, reading weights directly from BRAM one element per cycle. This eliminates the register arrays in `transformer_decoder_top`.
+**Scaling**: Increase `D_MODEL`, `N_HEADS`, `D_FF` in `transformer_pkg.sv`. The systolic array dimensions (`PE_ROWS`, `PE_COLS`) control throughput.
 
-**Parallel softmax**: Instantiate N_HEADS `softmax_unit` modules for 4× lower softmax latency.
+**Multi-layer**: Instantiate N `transformer_decoder` blocks with a sequencer FSM. Weight memories can be shared (time-multiplexed) or replicated per layer.
 
-**Tiled projections**: Route QKV and output projections through the 4×4 systolic array for reduced critical path.
+**FPGA targeting**: The design is synthesizable as-is for Xilinx/Intel FPGAs. Replace combinational weight arrays with BRAM interfaces for practical implementations beyond the reference parameter set.
 
-**Multi-layer stacking**: See dedicated section below.
+**Quantisation upgrade**: The package-level type definitions and fixed-point utility functions in `transformer_pkg.sv` are the single point of change for moving to wider formats (e.g. Q12.4, INT8 with per-channel scale).
 
-**Scaling up**: Increase `D_MODEL`, `N_HEADS`, `D_FF` in `transformer_pkg.sv`.
-
-## Multi-Layer Stacking
-
-A production LLM uses many identical decoder layers (GPT-2: 12–48, LLaMA-7B: 32, LLaMA-70B: 80). This design implements a single layer. Stacking multiple layers to form a complete model can follow several strategies, each with different area/performance/memory trade-offs.
-
-### Strategy 1: Spatial Replication (One Layer Per Instance)
-
-The most straightforward approach: instantiate N separate `transformer_decoder_top` modules, each with its own weight BRAMs, and chain their outputs to inputs.
-
-```
-token_emb ──► [Layer 0] ──► [Layer 1] ──► ... ──► [Layer N-1] ──► logits
-               128 KB         128 KB                  128 KB
-```
-
-**Wiring.** Each layer's `out_emb` connects directly to the next layer's `token_emb`. A top-level sequencer asserts `start` on layer 0, waits for `valid`, then asserts `start` on layer 1, and so on. The `seq_pos` signal is shared across all layers (same token position in every layer).
-
-**KV-cache.** Each layer maintains its own independent KV-cache BRAM pair. This is correct — in a transformer, each layer's attention operates on its own K/V projections, so caches are not shared between layers.
-
-**Resource cost.** Linear in N: an N-layer model requires N × 126 BRAM18K (~128 KB each). A 12-layer GPT-2-small-scale model at D_MODEL=64 would need ~1,512 BRAM18K and ~1.5 MB — feasible on a Xilinx Kintex UltraScale (1,800+ BRAM18K) or Alveo U250 (5,376 BRAM18K). Compute resources (DSP48, LUTs) also scale linearly.
-
-**Latency.** N × single-layer latency (~3,200 cycles per layer at seq_len=128). All layers execute sequentially since each depends on the previous layer's output. For 12 layers: ~38,400 cycles = ~384 μs at 100 MHz.
-
-**When to use.** When the FPGA is large enough to hold all layers simultaneously. This gives the simplest control logic and the lowest latency since there is no weight reloading overhead.
-
-### Strategy 2: Temporal Reuse (Single Instance, Weight Swapping)
-
-Use a single `transformer_decoder_top` instance and reload its weight BRAMs between layers.
-
-```
-                    ┌──────────────────────────┐
-token_emb ──►       │  transformer_decoder_top  │ ──► out_emb
-                    │  (single instance)        │       │
-                    └──────────────────────────┘       │
-                         ▲                              │
-                         │ weight-load bus              │
-              ┌──────────┴──────────┐          ┌───────▼───────┐
-              │  External Memory    │          │  Embedding    │
-              │  (DDR/HBM/Flash)   │          │  Register     │
-              │  Layer 0 weights   │          │  (feedback)   │
-              │  Layer 1 weights   │          └───────────────┘
-              │  ...               │
-              └─────────────────────┘
-```
-
-**Weight loading.** Between each layer pass, a DMA controller streams the next layer's 49,344 weights through the `wl_en`/`wl_addr`/`wl_data` bus. At one word per cycle, this takes ~49,344 cycles. With a wider bus (32-bit or 64-bit data), this halves or quarters.
-
-**Embedding feedback.** The `out_emb` output is registered and fed back to `token_emb` for the next layer pass. A simple output register with a mux (external input for layer 0, feedback for layers 1+) handles this.
-
-**KV-cache management.** This is the main complication. Each layer needs its own KV-cache, but the single instance only has one pair of cache BRAMs. Options: (a) save/restore cache contents to external memory between layers (expensive — 16 KB per layer per swap), (b) use external memory for all KV-cache storage with an address offset per layer, or (c) keep N separate KV-cache BRAM pairs while sharing the compute core (hybrid approach, see Strategy 3).
-
-**Resource cost.** Constant compute resources (1× decoder = ~126 BRAM18K for weights). KV-cache storage depends on the approach chosen. External memory bandwidth becomes the bottleneck.
-
-**Latency.** N × (compute_time + weight_load_time). For 12 layers with 49K-cycle reload: ~12 × (3,200 + 49,344) = ~630,528 cycles. The weight reload dominates — the design spends 94% of its time loading weights. A wider weight bus or block-RAM DMA is essential to make this practical.
-
-**When to use.** When the target FPGA cannot fit multiple layer instances. Requires external memory with sufficient bandwidth. Best paired with the streaming weight architecture (see Extending the Design) which eliminates the register-array pre-load.
-
-### Strategy 3: Hybrid (Shared Compute, Dedicated KV-Cache)
-
-A middle ground: one compute core with weight swapping, but N dedicated KV-cache BRAM pairs that persist across all tokens.
-
-```
-                    ┌─────────────────────────────────────┐
-                    │  multi_layer_top                     │
-                    │                                      │
-                    │  ┌────────────────────────────────┐ │
- token_emb ────────►│  │ transformer_decoder (shared)    │ │
-                    │  │ + Weight BRAMs (swapped/layer)  │ │
-                    │  └───────────┬────────────────────┘ │
-                    │              │                       │
-                    │  ┌───────────▼────────────────────┐ │
-                    │  │ KV-Cache Bank                   │ │
-                    │  │ Layer 0: K₀[128×64] V₀[128×64] │ │
-                    │  │ Layer 1: K₁[128×64] V₁[128×64] │ │
-                    │  │ ...                              │ │
-                    │  │ Layer N: Kₙ[128×64] Vₙ[128×64] │ │
-                    │  └──────────────────────────────────┘ │
-                    └─────────────────────────────────────┘
-```
-
-**How it works.** The compute core processes layer 0, writing to KV-cache bank 0 and reading from KV-cache bank 0. Then weights are swapped and it processes layer 1 with KV-cache bank 1, and so on. A layer-index register selects which cache bank connects to the decoder's cache ports.
-
-**KV-cache cost.** N layers × 2 BRAMs × ~8 BRAM18K = 16N BRAM18K. For 12 layers: 192 BRAM18K just for cache. Combined with the shared compute BRAMs (~126): ~318 BRAM18K total.
-
-**Advantage over Strategy 2.** No cache save/restore traffic. The KV-cache is the state that grows with sequence length and must persist across every token generation step — keeping it on-chip avoids the most latency-sensitive external memory accesses.
-
-**When to use.** When the FPGA has enough BRAM for N cache banks but not N full layer instances. This is often the right trade-off: cache BRAMs (16N BRAM18K) are much cheaper than full weight BRAMs (126N BRAM18K).
-
-### Strategy 4: Pipelined Layers
-
-If the FPGA can fit N layer instances, overlap execution across tokens rather than running them sequentially.
-
-```
-Token t:    [L0]──►[L1]──►[L2]──►...──►[LN]──► output
-Token t+1:         [L0]──►[L1]──►[L2]──►...──►[LN]──► output
-Token t+2:                [L0]──►[L1]──►...
-```
-
-Once layer 0 finishes token t and passes its output to layer 1, layer 0 can immediately begin processing token t+1. This creates a pipeline with throughput of one token per single-layer latency (~3,200 cycles) rather than one token per N-layer latency.
-
-**Requirement.** Each layer needs independent weight BRAMs (same as Strategy 1) AND each layer's KV-cache must support concurrent read (for the current token) and write (for the new token). The dual-port BRAM already supports this.
-
-**Complication.** Autoregressive generation has a data dependency: the next token depends on the final layer's output (via the language model head and sampling). So the pipeline only helps with throughput if processing a batch of independent sequences, or during prefill when all tokens are known in advance. For single-sequence autoregressive decode, pipelining provides no benefit — each token must complete all N layers before the next token's identity is known.
-
-**When to use.** Batch inference or prefill, where multiple independent tokens can be in-flight simultaneously. Not useful for single-sequence autoregressive generation.
-
-### Comparison
-
-| Strategy | BRAM18K (12 layers) | Latency/token | Weight bandwidth | Complexity |
-|----------|---------------------|---------------|-----------------|------------|
-| Spatial replication | ~1,512 | ~38K cycles | None (all on-chip) | Low |
-| Temporal reuse | ~126 + ext. mem | ~630K cycles | ~600K words/token | Medium |
-| Hybrid (shared compute) | ~318 + ext. mem | ~630K cycles | ~600K words/token | Medium |
-| Pipelined | ~1,512 | ~3.2K cycles* | None (all on-chip) | High |
-
-\* Throughput per token in steady state; single-sequence autoregressive decode still takes ~38K cycles.
-
-### Practical Implementation Notes
-
-**Top-level sequencer.** All strategies need a state machine that manages the layer progression: tracking the current layer index, asserting start/waiting for valid on each layer pass, managing the embedding feedback path, and (for weight-swapping strategies) triggering weight reloads between layers.
-
-**Embedding register.** A D_MODEL-wide register between layers stores the intermediate embedding. For Strategy 1, this is just wiring; for Strategies 2–3, it requires an explicit register with feedback mux.
-
-**Layer-norm final.** Production transformers apply a final LayerNorm after the last decoder layer, before the language model head. This would be one additional `layer_norm` instance at the output of the layer stack.
-
-**Language model head.** After all N decoder layers, the output embedding is projected to vocabulary logits via a large matrix multiply (D_MODEL × VOCAB_SIZE). This is a single linear layer with no bias, often sharing weights with the input embedding table. For D_MODEL=64, VOCAB_SIZE=256: 16K parameters, fitting in one additional BRAM.
-
-## Multi-Device Distributed Inference
-
-When a model exceeds the capacity of a single FPGA (or ASIC), it must be partitioned across multiple physical devices connected by high-speed serial links. This section covers the partitioning strategies, interconnect requirements, and protocol design for distributing this decoder across multiple chips.
-
-### Why Multi-Device?
-
-A single decoder layer at D_MODEL=64 fits comfortably on one mid-range FPGA (~126 BRAM18K, ~150 DSP48). But scaling to production dimensions changes the picture dramatically:
-
-| Model | Layers | D_MODEL | Params/layer | Total params | BRAM18K/layer |
-|-------|--------|---------|-------------|-------------|---------------|
-| This design | 1 | 64 | 49K | 49K | ~126 |
-| GPT-2 Small | 12 | 768 | 7M | 85M | ~19K |
-| LLaMA-7B | 32 | 4096 | 202M | 6.5B | ~550K |
-| LLaMA-70B | 80 | 8192 | 805M | 64.5B | ~2.2M |
-
-Even GPT-2 Small exceeds the largest single FPGA. Multi-device partitioning is unavoidable for any production-scale model.
-
-### Partitioning Strategies
-
-#### Pipeline Parallelism (Layer-Wise Split)
-
-Assign consecutive layers to different devices. Each device holds a subset of the model's depth.
-
-```
-          High-speed serial link        High-speed serial link
-Device 0 ◄────────────────────► Device 1 ◄────────────────────► Device 2
-┌──────────────────┐    ┌──────────────────┐    ┌──────────────────┐
-│ Layers 0–3       │    │ Layers 4–7       │    │ Layers 8–11      │
-│ + KV-cache 0–3   │    │ + KV-cache 4–7   │    │ + KV-cache 8–11  │
-│ + Embedding table │    │                  │    │ + LM Head        │
-└──────────────────┘    └──────────────────┘    └──────────────────┘
-        │                       ▲ │                      ▲
-        └───── emb vector ──────┘ └──── emb vector ──────┘
-             (D_MODEL words)           (D_MODEL words)
-```
-
-**Inter-device traffic.** After each device completes its layers, it sends a single embedding vector (D_MODEL elements × 16 bits) to the next device. For D_MODEL=64: 128 bytes per token per hop. For D_MODEL=4096 (LLaMA-7B): 8 KB per token per hop.
-
-**Latency analysis.** The critical path is the sequential pipeline: Device 0 processes layers 0–3, sends embedding to Device 1, which processes layers 4–7, and so on. The inter-device transfer adds link latency at each hop. With K devices and N total layers:
-
-    Total latency = K × (N/K × layer_compute) + (K-1) × link_latency
-                  = N × layer_compute + (K-1) × link_latency
-
-The compute time is unchanged — pipeline parallelism doesn't reduce single-token latency. It only helps by fitting a larger model than one device can hold. The link hops add pure overhead.
-
-**Link bandwidth requirement.** Modest. One embedding vector per token per hop. At 100 MHz compute clock and ~3,200 cycles per layer, a 4-layer partition produces one embedding every ~12,800 cycles = ~128 μs. Transferring 128 bytes in 128 μs requires only 1 MB/s — trivial for any modern serial link. Even at D_MODEL=4096, the requirement is ~62 MB/s, well within a single GTH transceiver lane.
-
-**Bubble problem.** During single-sequence autoregressive decode, only one device is active at a time — the others idle while waiting for their input. Device utilisation is 1/K. This can be mitigated by processing multiple independent sequences (micro-batching): while Device 1 processes sequence A's layers 4–7, Device 0 processes sequence B's layers 0–3.
-
-**Mapping from this design.** Each device instantiates `transformer_decoder_top` (Strategy 1 or 3 from the multi-layer section) for its assigned layers. A thin TX/RX wrapper serialises/deserialises the `out_emb` vector onto the link. The `start`/`valid` handshake extends across the link as flow control signals.
-
-#### Tensor Parallelism (Intra-Layer Split)
-
-Split each layer's computation across devices. Each device holds a slice of every weight matrix.
-
-```
-                    High-speed serial link (all-reduce)
-              ┌────────────────────────────────────────────┐
-              │                                            │
-    Device 0  │                                  Device 1  │
-┌─────────────┴───────┐              ┌─────────────────────┴┐
-│ All layers           │              │ All layers            │
-│ Wq[:,0:D/2]          │              │ Wq[:,D/2:D]           │
-│ Wk[:,0:D/2]          │              │ Wk[:,D/2:D]           │
-│ Heads 0–1            │              │ Heads 2–3             │
-│ FFN W1[:,0:D_FF/2]   │              │ FFN W1[:,D_FF/2:D_FF] │
-└──────────────────────┘              └───────────────────────┘
-         │                                      │
-         └──────── partial sums ────────────────┘
-                   (all-reduce)
-```
-
-**How it works.** For attention: each device computes a subset of attention heads (e.g., 2 heads each on 2 devices). The per-head outputs are concatenated across devices before the output projection. For FFN: each device computes a slice of the hidden dimension. Partial results are summed via an all-reduce operation.
-
-**Inter-device traffic.** Much higher than pipeline parallelism. Every layer requires one or more all-reduce operations across all devices. Each all-reduce exchanges D_MODEL × 16-bit partial sums. For a ring all-reduce with K devices, each device sends and receives (K-1)/K × D_MODEL × 2 bytes per all-reduce. With two all-reduces per layer (attention output + FFN output) and N layers:
-
-    Bytes per token = 2 × N × 2 × (K-1)/K × D_MODEL × 2
-
-For 12 layers, D_MODEL=4096, K=4: ~384 KB per token. At 3,200 cycles per layer (~384 μs): effective bandwidth requirement ~1 GB/s per link — still feasible with multi-lane GTH/GTY transceivers, but a meaningful design constraint.
-
-**Advantage.** Reduces memory per device proportionally to K. Each device holds 1/K of the weight matrices. Critically, it reduces single-token latency for memory-bandwidth-bound operations since each device processes fewer parameters.
-
-**Mapping from this design.** The attention module's head loop would be split across devices, each computing N_HEADS/K heads. A new all-reduce module would sum partial output-projection results. The FFN would similarly split the D_FF dimension. The systolic array's tile size naturally supports this partitioning.
-
-#### Hybrid Pipeline + Tensor Parallelism
-
-Production systems (Megatron-LM, DeepSpeed) combine both:
-
-```
-            TP group 0              TP group 1
-         (tensor parallel)       (tensor parallel)
-    ┌────────┬────────┐     ┌────────┬────────┐
-    │ Dev 0  │ Dev 1  │     │ Dev 2  │ Dev 3  │
-    │ L0–5   │ L0–5   │────►│ L6–11  │ L6–11  │
-    │ heads  │ heads  │     │ heads  │ heads  │
-    │ 0–1    │ 2–3    │     │ 0–1    │ 2–3    │
-    └────────┴────────┘     └────────┴────────┘
-     ◄── all-reduce ──►     ◄── all-reduce ──►
-       (high bandwidth)       (high bandwidth)
-              │                       ▲
-              └── pipeline hop ───────┘
-                 (low bandwidth)
-```
-
-Tensor parallelism within a group of tightly-connected devices (high-bandwidth links), pipeline parallelism between groups (lower-bandwidth links). This matches the physical topology of multi-FPGA systems where devices on the same board share high-speed traces, while inter-board links are more constrained.
-
-### High-Speed Serial Link Options
-
-| Link Technology | Raw Rate (per lane) | Typical FPGA | Latency | Notes |
-|----------------|-------------------|-------------|---------|-------|
-| Xilinx Aurora (GTH) | 12.5–16.3 Gbps | Kintex/Virtex US+ | ~100–200 ns | Point-to-point, low overhead |
-| Xilinx Aurora (GTY) | 25–32.75 Gbps | Virtex US+ / Versal | ~100–200 ns | Higher-end FPGAs |
-| Intel Stratix TX | 17.4–28.3 Gbps | Stratix 10 | ~100–200 ns | Intel ecosystem |
-| PCIe Gen4 ×16 | 256 Gbps aggregate | Most FPGAs | ~1–2 μs | Standard, higher latency |
-| CXL 2.0 | 256 Gbps (×16) | Versal/Agilex | ~200–400 ns | Cache-coherent, emerging |
-| Custom LVDS | 1–3 Gbps | Any FPGA | ~10–50 ns | Lowest latency, low bandwidth |
-| Chip-to-chip die link | 100+ Gbps | ASIC / chiplet | ~1–5 ns | For custom silicon / chiplets |
-
-**Bandwidth calculation example.** Pipeline parallelism with D_MODEL=4096: 8 KB per hop. At one hop every 128 μs (4 layers at 100 MHz), the requirement is 62 MB/s = 0.5 Gbps. A single GTH lane at 12.5 Gbps provides 25× headroom. Tensor parallelism at D_MODEL=4096 with 12 layers: ~1 GB/s = 8 Gbps. One GTH lane still suffices, but with only ~1.5× margin — a dual-lane Aurora link would be prudent.
-
-### Protocol Design
-
-The inter-device protocol needs to handle three concerns:
-
-**Embedding transfer.** A simple streaming protocol: header (layer index, sequence position, token ID) followed by D_MODEL data words. With packed array ports, the embedding is already a contiguous bit vector that maps directly to a serial frame. At D_MODEL=64, the entire payload is 128 bytes — a single Aurora frame with minimal framing overhead.
-
-**Flow control.** The producing device asserts `valid` when its embedding is ready; the consuming device asserts `ready` when it can accept data. This maps naturally to AXI-Stream (TVALID/TREADY), which Aurora supports natively. Back-pressure propagates automatically: if a downstream device stalls, the upstream device holds its output.
-
-**Synchronisation.** Each device maintains its own clock domain. The serial transceiver handles clock domain crossing internally. A small elastic FIFO (8–16 entries) at the receiver absorbs jitter. The `start`/`valid` handshake protocol already tolerates arbitrary delays, so no lockstep synchronisation is required — devices can run at different clock frequencies.
-
-**All-reduce (for tensor parallelism).** A ring all-reduce requires each device to simultaneously send a partial sum to its neighbour and receive a partial sum from the other direction. This needs bidirectional links and a reduce-scatter / all-gather FSM. For K=2 devices, a simple exchange-and-add suffices:
-
-```
-Device 0 sends partial_sum_0 ──► Device 1 computes partial_sum_0 + partial_sum_1
-Device 1 sends partial_sum_1 ──► Device 0 computes partial_sum_0 + partial_sum_1
-```
-
-For K>2, a ring topology with log₂(K) reduce phases is standard.
-
-### RTL Implementation Sketch
-
-Extending this design for multi-device operation requires three new modules:
-
-**link_tx** — Serialises the D_MODEL-wide `out_emb` packed vector into a stream of N-bit words matching the transceiver width (e.g., 64-bit for Aurora). Appends a header with layer index and sequence position. Drives an AXI-Stream interface to the Aurora IP.
-
-**link_rx** — Receives the serial stream, strips the header, and deserialises into a D_MODEL-wide packed vector. Provides this as `token_emb` input to the local decoder instance. A small FIFO handles clock domain crossing.
-
-**multi_device_top** — Wraps the decoder with TX/RX links and a partition controller FSM:
-
-```
-                 ┌──────────────────────────────────────┐
-  serial_rx ────►│  link_rx ──► token_emb               │
-                 │                  │                    │
-                 │      ┌───────────▼─────────────────┐ │
-                 │      │ transformer_decoder_top      │ │
-                 │      │ (local layers)               │ │
-                 │      └───────────┬─────────────────┘ │
-                 │                  │                    │
-                 │          out_emb ▼                    │
-                 │  ┌───────────────────┐               │
-                 │  │ partition_ctrl    │               │
-                 │  │ if last_layer:   │               │
-                 │  │   → output port  │               │
-                 │  │ else:            │               │
-                 │  │   → link_tx ─────┼──► serial_tx  │
-                 │  └───────────────────┘               │
-                 └──────────────────────────────────────┘
-```
-
-The partition controller checks whether the current device holds the final layers. If so, the embedding goes to the output port (language model head). Otherwise, it goes to `link_tx` for forwarding to the next device.
-
-### Practical Considerations
-
-**Error handling.** High-speed serial links have non-zero bit error rates (~10⁻¹² for GTH at 16 Gbps). For inference, a single bit flip in an embedding can corrupt the entire output sequence. The Aurora core provides CRC checking and automatic retry. For additional protection, embedding checksums can be included in the transfer header.
-
-**Thermal and power.** Multi-FPGA systems require careful thermal management. Each FPGA dissipates 10–30 W depending on utilisation. A 4-FPGA system at 30 W each draws 120 W — comparable to a single GPU but distributed across multiple power domains. Board design must account for per-device power delivery and cooling.
-
-**Debugging.** Distributed systems are harder to debug than single-chip designs. Adding ILA (Integrated Logic Analyzer) probes on the link interfaces and embedding registers helps. The packed array port format makes it straightforward to capture and display embedding values in the waveform viewer.
-
-**Scalability limit.** Pipeline parallelism adds (K-1) × link_latency overhead. For autoregressive decode, device utilisation drops to 1/K without micro-batching. Beyond ~8 pipeline stages, the bubble overhead and link latencies dominate. Tensor parallelism scales better for latency but demands proportionally higher inter-device bandwidth. The practical limit depends on the link topology and bandwidth available.
-
-## Implementation Estimates (Xilinx Artix-7)
-
-| Block | DSP48 | FFs | LUTs | BRAM18K |
-|-------|-------|-----|------|---------|
-| Processing Element | 1 | ~30 | ~20 | — |
-| 4×4 Systolic Array | 16 | ~500 | ~350 | — |
-| Softmax Unit (VEC_LEN=128) | 2 | ~2K | ~3K | — |
-| Layer Normalisation | 4–6 | ~400 | ~600 | — |
-| Multi-Head Attention | ~64 | ~5K | ~8K | — |
-| Feed-Forward Network | ~64 | ~3K | ~5K | — |
-| Weight BRAMs (12 instances) | — | — | — | ~110 |
-| KV-Cache BRAMs (2 instances) | — | — | — | ~16 |
-| **Full Decoder (top)** | **~150** | **~11K** | **~17K** | **~126** |
-
-Clock frequency estimate: 100–200 MHz depending on place-and-route effort.
+---
 
 ## License
 

@@ -14,6 +14,8 @@ module tb_softmax;
 
   softmax_unit #(.VEC_LEN(VEC_LEN)) dut (.*);
 
+  integer i;
+  integer s;
   initial clk = 0;
   always #5 clk = ~clk;
 
@@ -22,9 +24,10 @@ module tb_softmax;
 
   // Sum of all output probabilities (should be ~1.0 in Q8.8 = 0x0100)
   function automatic int sum_probs();
+    integer i;
     int s = 0;
-    for (int i = 0; i < VEC_LEN; i++)
-      s += int'(probs[i]);
+    for (i = 0; i < VEC_LEN; i = i + 1)
+      s += (probs[i]);
     return s;
   endfunction
 
@@ -36,14 +39,14 @@ module tb_softmax;
     // Reset
     rst_n = 0;
     start = 0;
-    for (int i = 0; i < VEC_LEN; i++) scores[i] = '0;
+    for (i = 0; i < VEC_LEN; i = i + 1) scores[i] = 0;
     repeat (4) @(posedge clk);
     rst_n = 1;
     @(posedge clk);
 
     // ---- Test 1: Uniform scores ----
     $display("\n--- Test 1: Uniform scores (all 1.0) ---");
-    for (int i = 0; i < VEC_LEN; i++)
+    for (i = 0; i < VEC_LEN; i = i + 1)
       scores[i] = 16'sh0100; // 1.0 in Q8.8
     @(posedge clk);
     start = 1;
@@ -55,8 +58,8 @@ module tb_softmax;
     @(posedge clk);
 
     $display("  Probabilities:");
-    for (int i = 0; i < VEC_LEN; i++)
-      $display("    probs[%0d] = %h (%.4f)", i, probs[i], real'(probs[i]) / 256.0);
+    for (i = 0; i < VEC_LEN; i = i + 1)
+      $display("    probs[%0d] = %h (%.4f)", i, probs[i], $itor(probs[i]) / 256.0);
 
     // All should be roughly equal (~1/8 = 0.125 = 0x0020)
     if (probs[0] > 0 && probs[0] == probs[1]) begin
@@ -73,7 +76,7 @@ module tb_softmax;
     repeat (4) @(posedge clk);
 
     scores[0] = 16'sh0400; // 4.0 (dominant)
-    for (int i = 1; i < VEC_LEN; i++)
+    for (i = 1; i < VEC_LEN; i = i + 1)
       scores[i] = 16'sh0010; // ~0.0625 (small)
 
     @(posedge clk);
@@ -85,7 +88,7 @@ module tb_softmax;
     @(posedge clk);
 
     $display("  Probabilities:");
-    for (int i = 0; i < VEC_LEN; i++)
+    for (i = 0; i < VEC_LEN; i = i + 1)
       $display("    probs[%0d] = %h", i, probs[i]);
 
     if (probs[0] > probs[1]) begin
@@ -100,7 +103,7 @@ module tb_softmax;
     $display("\n--- Test 3: Negative scores ---");
     repeat (4) @(posedge clk);
 
-    for (int i = 0; i < VEC_LEN; i++)
+    for (i = 0; i < VEC_LEN; i = i + 1)
       scores[i] = -16'sh0100 * (i + 1); // -1, -2, ... -8
 
     @(posedge clk);
@@ -112,7 +115,7 @@ module tb_softmax;
     @(posedge clk);
 
     $display("  Probabilities:");
-    for (int i = 0; i < VEC_LEN; i++)
+    for (i = 0; i < VEC_LEN; i = i + 1)
       $display("    probs[%0d] = %h", i, probs[i]);
 
     // First element (least negative) should have highest probability
@@ -127,7 +130,7 @@ module tb_softmax;
     // ---- Test 4: Sum check ----
     $display("\n--- Test 4: Probability sum ---");
     begin
-      int s = sum_probs();
+      s = sum_probs();
       $display("  Sum of probabilities = %h (ideal: 0100)", s);
       // Allow ±20% tolerance for fixed-point approximation
       if (s > 16'sh00C0 && s < 16'sh0140) begin

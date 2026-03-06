@@ -34,13 +34,13 @@ module weight_bram
   // --- Bulk write interface (for initialisation) ---
   input  logic                              wr_en,
   input  logic [$clog2(ROWS*COLS)-1:0]      wr_addr,   // Flat address (row-major)
-  input  data_t                             wr_data,
+  input  signed [15:0]                             wr_data,
 
   // --- Column-read interface ---
   input  logic                              col_rd_start,
   input  logic [$clog2(COLS)-1:0]           col_rd_idx,   // Which column to read
-  output data_t                             col_data [ROWS], // Registered output buffer
-  output logic                              col_rd_done
+  output reg signed [15:0]                             col_data [ROWS], // Registered output buffer
+  output reg                              col_rd_done
 );
 
   localparam int TOTAL = ROWS * COLS;
@@ -66,14 +66,12 @@ module weight_bram
   );
 
   // Column-read FSM
-  typedef enum logic [1:0] {
-    RD_IDLE,
-    RD_FETCH,    // Issue read addresses to BRAM
-    RD_CAPTURE,  // Capture the last read (1-cycle pipeline delay)
-    RD_DONE
-  } rd_state_t;
+  localparam [1:0] RD_IDLE = 0;
+  localparam [1:0] RD_FETCH = 1;
+  localparam [1:0] RD_CAPTURE = 2;
+  localparam [1:0] RD_DONE = 3;
 
-  rd_state_t rd_state, rd_state_next;
+  reg [1:0] rd_state, rd_state_next;
 
   logic [$clog2(ROWS):0] rd_row;       // Current row being read
   logic [$clog2(COLS)-1:0] rd_col_reg; // Latched column index
@@ -82,12 +80,12 @@ module weight_bram
   // =========================================================================
   // Sequential Logic
   // =========================================================================
-  always_ff @(posedge clk or negedge rst_n) begin
+  always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       rd_state    <= RD_IDLE;
-      rd_row      <= '0;
-      capture_row <= '0;
-      rd_col_reg  <= '0;
+      rd_row      <= 0;
+      capture_row <= 0;
+      rd_col_reg  <= 0;
       col_rd_done <= 1'b0;
     end else begin
       rd_state    <= rd_state_next;
@@ -97,28 +95,28 @@ module weight_bram
         RD_IDLE: begin
           if (col_rd_start) begin
             rd_col_reg  <= col_rd_idx;
-            rd_row      <= '0;
-            capture_row <= '0;
+            rd_row      <= 0;
+            capture_row <= 0;
           end
         end
 
         RD_FETCH: begin
           // Issue read for row rd_row, column rd_col_reg
           // Capture arrives next cycle
-          if (rd_row < ROWS[$clog2(ROWS):0]) begin
+          if (rd_row < ROWS) begin
             rd_row <= rd_row + 1;
           end
           // Capture the data that was read 1 cycle ago
-          if (capture_row < rd_row && capture_row < ROWS[$clog2(ROWS):0]) begin
-            col_data[capture_row] <= data_t'(bram_rdata);
+          if (capture_row < rd_row && capture_row < ROWS) begin
+            col_data[capture_row] <= to_data(bram_rdata);
             capture_row <= capture_row + 1;
           end
         end
 
         RD_CAPTURE: begin
           // Capture final element(s) still in the pipeline
-          if (capture_row < ROWS[$clog2(ROWS):0]) begin
-            col_data[capture_row] <= data_t'(bram_rdata);
+          if (capture_row < ROWS) begin
+            col_data[capture_row] <= to_data(bram_rdata);
             capture_row <= capture_row + 1;
           end else begin
             col_rd_done <= 1'b1;
@@ -133,12 +131,12 @@ module weight_bram
   // =========================================================================
   // Next-State Logic
   // =========================================================================
-  always_comb begin
+  always @(*) begin
     rd_state_next = rd_state;
     case (rd_state)
       RD_IDLE:    if (col_rd_start) rd_state_next = RD_FETCH;
-      RD_FETCH:   if (rd_row >= ROWS[$clog2(ROWS):0]) rd_state_next = RD_CAPTURE;
-      RD_CAPTURE: if (capture_row >= ROWS[$clog2(ROWS):0]) rd_state_next = RD_DONE;
+      RD_FETCH:   if (rd_row >= ROWS) rd_state_next = RD_CAPTURE;
+      RD_CAPTURE: if (capture_row >= ROWS) rd_state_next = RD_DONE;
       RD_DONE:    rd_state_next = RD_IDLE;
       default:    rd_state_next = RD_IDLE;
     endcase
@@ -147,22 +145,22 @@ module weight_bram
   // =========================================================================
   // BRAM Address and Write Mux
   // =========================================================================
-  always_comb begin
+  always @(*) begin
     if (wr_en) begin
       // Write path: external bulk load
       bram_we    = 1'b1;
       bram_addr  = wr_addr;
       bram_wdata = wr_data;
-    end else if (rd_state == RD_FETCH && rd_row < ROWS[$clog2(ROWS):0]) begin
+    end else if (rd_state == RD_FETCH && rd_row < ROWS) begin
       // Read path: sequential column read
       // Address = rd_row * COLS + rd_col_reg
       bram_we    = 1'b0;
-      bram_addr  = ADDR_W'(rd_row * COLS + {1'b0, rd_col_reg});
-      bram_wdata = '0;
+      bram_addr  = (rd_row * COLS + {1'b0, rd_col_reg});
+      bram_wdata = 0;
     end else begin
       bram_we    = 1'b0;
-      bram_addr  = '0;
-      bram_wdata = '0;
+      bram_addr  = 0;
+      bram_wdata = 0;
     end
   end
 

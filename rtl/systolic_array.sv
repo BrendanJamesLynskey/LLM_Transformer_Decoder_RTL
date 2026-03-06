@@ -29,33 +29,32 @@ module systolic_array
 
   // Output: accumulated results from each PE (packed 1D, row-major)
   // result[r*COLS+c] = acc_out of PE at (r,c)
-  output logic signed [ROWS*COLS-1:0][ACC_WIDTH-1:0] result,
-  output logic   done
+  output reg signed [ROWS*COLS-1:0][ACC_WIDTH-1:0] result,
+  output reg   done
 );
 
   // Internal wires connecting PEs
-  data_t a_wire [ROWS][COLS+1];
-  data_t w_wire [ROWS+1][COLS];
+  reg signed [15:0] a_wire [ROWS][COLS+1];
+  reg signed [15:0] w_wire [ROWS+1][COLS];
 
   // Cycle counter for completion detection
   logic [$clog2(ROWS+COLS):0] cycle_cnt;
 
   // Connect inputs to left and top edges
   genvar gi;
-  generate
-    for (gi = 0; gi < ROWS; gi++) begin : gen_a_in
+
+    for (gi = 0; gi < ROWS; gi = gi + 1) begin : gen_a_in
       assign a_wire[gi][0] = a_in[gi];
     end
-    for (gi = 0; gi < COLS; gi++) begin : gen_b_in
+    for (gi = 0; gi < COLS; gi = gi + 1) begin : gen_b_in
       assign w_wire[0][gi] = b_in[gi];
     end
-  endgenerate
 
   // Instantiate PE grid
   genvar r, c;
-  generate
-    for (r = 0; r < ROWS; r++) begin : gen_row
-      for (c = 0; c < COLS; c++) begin : gen_col
+
+    for (r = 0; r < ROWS; r = r + 1) begin : gen_row
+      for (c = 0; c < COLS; c = c + 1) begin : gen_col
         processing_element u_pe (
           .clk     (clk),
           .rst_n   (rst_n),
@@ -69,15 +68,14 @@ module systolic_array
         );
       end
     end
-  endgenerate
 
   // Completion counter
-  always_ff @(posedge clk or negedge rst_n) begin
+  always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
-      cycle_cnt <= '0;
+      cycle_cnt <= 0;
       done      <= 1'b0;
     end else if (clear) begin
-      cycle_cnt <= '0;
+      cycle_cnt <= 0;
       done      <= 1'b0;
     end else if (enable && !done) begin
       cycle_cnt <= cycle_cnt + 1;

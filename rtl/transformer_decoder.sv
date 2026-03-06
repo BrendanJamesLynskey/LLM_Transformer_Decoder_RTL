@@ -26,10 +26,10 @@ module transformer_decoder
   input  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] token_emb,
 
   // Attention weights (unpacked 2D)
-  input  data_t  wq [D_MODEL][D_MODEL],
-  input  data_t  wk [D_MODEL][D_MODEL],
-  input  data_t  wv [D_MODEL][D_MODEL],
-  input  data_t  wo [D_MODEL][D_MODEL],
+  input  signed [15:0]  wq [D_MODEL][D_MODEL],
+  input  signed [15:0]  wk [D_MODEL][D_MODEL],
+  input  signed [15:0]  wv [D_MODEL][D_MODEL],
+  input  signed [15:0]  wo [D_MODEL][D_MODEL],
 
   // LayerNorm parameters (packed 1D)
   input  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ln1_gamma,
@@ -38,45 +38,44 @@ module transformer_decoder
   input  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ln2_beta,
 
   // FFN weights (unpacked 2D, packed 1D for biases)
-  input  data_t  ffn_w1 [D_MODEL][D_FF],
-  input  data_t  ffn_b1 [D_FF],
-  input  data_t  ffn_w2 [D_FF][D_MODEL],
+  input  signed [15:0]  ffn_w1 [D_MODEL][D_FF],
+  input  signed [15:0]  ffn_b1 [D_FF],
+  input  signed [15:0]  ffn_w2 [D_FF][D_MODEL],
   input  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ffn_b2,
 
   // Sequence position
-  input  seq_idx_t seq_pos,
+  input  [6:0] seq_pos,
 
   // KV-Cache
-  output logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] k_cache_wr,
-  output logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] v_cache_wr,
-  output logic   cache_wr_en,
-  input  data_t  k_cache [MAX_SEQ_LEN][D_MODEL],
-  input  data_t  v_cache [MAX_SEQ_LEN][D_MODEL],
+  output reg signed [D_MODEL-1:0][DATA_WIDTH-1:0] k_cache_wr,
+  output reg signed [D_MODEL-1:0][DATA_WIDTH-1:0] v_cache_wr,
+  output reg   cache_wr_en,
+  input  signed [15:0]  k_cache [MAX_SEQ_LEN][D_MODEL],
+  input  signed [15:0]  v_cache [MAX_SEQ_LEN][D_MODEL],
 
   // Output (packed 1D)
-  output logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] out_emb,
-  output logic   valid
+  output reg signed [D_MODEL-1:0][DATA_WIDTH-1:0] out_emb,
+  output reg   valid
 );
 
+  integer i;
   // =========================================================================
   // Top-Level FSM
   // =========================================================================
-  typedef enum logic [3:0] {
-    S_IDLE,
-    S_LN1_START,
-    S_LN1_WAIT,
-    S_ATTN_START,
-    S_ATTN_WAIT,
-    S_RESIDUAL1,
-    S_LN2_START,
-    S_LN2_WAIT,
-    S_FFN_START,
-    S_FFN_WAIT,
-    S_RESIDUAL2,
-    S_DONE
-  } top_state_t;
+  localparam [3:0] S_IDLE = 0;
+  localparam [3:0] S_LN1_START = 1;
+  localparam [3:0] S_LN1_WAIT = 2;
+  localparam [3:0] S_ATTN_START = 3;
+  localparam [3:0] S_ATTN_WAIT = 4;
+  localparam [3:0] S_RESIDUAL1 = 5;
+  localparam [3:0] S_LN2_START = 6;
+  localparam [3:0] S_LN2_WAIT = 7;
+  localparam [3:0] S_FFN_START = 8;
+  localparam [3:0] S_FFN_WAIT = 9;
+  localparam [3:0] S_RESIDUAL2 = 10;
+  localparam [3:0] S_DONE = 11;
 
-  top_state_t state, state_next;
+  reg [3:0] state, state_next;
 
   // Intermediate signals
   logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ln1_out;
@@ -156,7 +155,7 @@ module transformer_decoder
   // =========================================================================
   // Top-Level FSM
   // =========================================================================
-  always_ff @(posedge clk or negedge rst_n) begin
+  always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       state      <= S_IDLE;
       valid      <= 1'b0;
@@ -164,9 +163,9 @@ module transformer_decoder
       attn_start <= 1'b0;
       ln2_start  <= 1'b0;
       ffn_start  <= 1'b0;
-      for (int i = 0; i < D_MODEL; i++) begin
-        residual1[i] <= '0;
-        out_emb[i]   <= '0;
+      for (i = 0; i < D_MODEL; i = i + 1) begin
+        residual1[i] <= 0;
+        out_emb[i]   <= 0;
       end
     end else begin
       state      <= state_next;
@@ -194,7 +193,7 @@ module transformer_decoder
 
         // Residual connection 1: residual1 = token_emb + attn_out
         S_RESIDUAL1: begin
-          for (int i = 0; i < D_MODEL; i++)
+          for (i = 0; i < D_MODEL; i = i + 1)
             residual1[i] <= fp_sat_add(token_emb[i], attn_out[i]);
         end
 
@@ -212,7 +211,7 @@ module transformer_decoder
 
         // Residual connection 2: out = residual1 + ffn_out
         S_RESIDUAL2: begin
-          for (int i = 0; i < D_MODEL; i++)
+          for (i = 0; i < D_MODEL; i = i + 1)
             out_emb[i] <= fp_sat_add(residual1[i], ffn_out[i]);
           valid <= 1'b1;
         end
@@ -227,7 +226,7 @@ module transformer_decoder
   // =========================================================================
   // Next-State Logic
   // =========================================================================
-  always_comb begin
+  always @(*) begin
     state_next = state;
     case (state)
       S_IDLE:       if (start) state_next = S_LN1_START;

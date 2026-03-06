@@ -58,6 +58,9 @@ run_decoder() {
     echo -e "${CYAN}========== Transformer Decoder Test ==========${NC}"
     iverilog -g2012 -o "$SIM_DIR/decoder_tb" \
         "$RTL_PKG" \
+        "$RTL_DIR/bram_sp.sv" \
+        "$RTL_DIR/bram_dp.sv" \
+        "$RTL_DIR/kv_cache_bram.sv" \
         "$RTL_DIR/processing_element.sv" \
         "$RTL_DIR/systolic_array.sv" \
         "$RTL_DIR/softmax_unit.sv" \
@@ -65,6 +68,7 @@ run_decoder() {
         "$RTL_DIR/multi_head_attention.sv" \
         "$RTL_DIR/feed_forward.sv" \
         "$RTL_DIR/transformer_decoder.sv" \
+        "$RTL_DIR/transformer_decoder_top.sv" \
         "$TB_DIR/tb_transformer_decoder.sv"
     vvp "$SIM_DIR/decoder_tb" | tee "$SIM_DIR/decoder_results.log"
     echo ""

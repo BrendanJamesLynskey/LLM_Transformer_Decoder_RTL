@@ -66,17 +66,18 @@ module transformer_decoder_top
   // --- Weight-loading bus (active during non-inference) ---
   input  logic     wl_en,
   input  logic [15:0] wl_addr,
-  input  data_t    wl_data,
+  input  signed [15:0]    wl_data,
 
   // --- Inference ---
   input  logic     start,
   input  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] token_emb,
-  input  seq_idx_t seq_pos,
+  input  [6:0] seq_pos,
 
-  output logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] out_emb,
-  output logic     valid
+  output reg signed [D_MODEL-1:0][DATA_WIDTH-1:0] out_emb,
+  output reg     valid
 );
 
+  integer d;
   // =========================================================================
   // Address Map
   // =========================================================================
@@ -99,7 +100,7 @@ module transformer_decoder_top
   logic we_wq, we_wk, we_wv, we_wo, we_w1, we_w2;
   logic we_ln1g, we_ln1b, we_ln2g, we_ln2b, we_b1, we_b2;
 
-  always_comb begin
+  always @(*) begin
     we_wq   = wl_en && (wl_addr >= BASE_WQ)   && (wl_addr < BASE_WK);
     we_wk   = wl_en && (wl_addr >= BASE_WK)   && (wl_addr < BASE_WV);
     we_wv   = wl_en && (wl_addr >= BASE_WV)   && (wl_addr < BASE_WO);
@@ -121,17 +122,17 @@ module transformer_decoder_top
   // They are loaded from BRAMs during reset/preload and updated
   // whenever the weight-load bus writes to the corresponding region.
 
-  data_t wq_arr [D_MODEL][D_MODEL];
-  data_t wk_arr [D_MODEL][D_MODEL];
-  data_t wv_arr [D_MODEL][D_MODEL];
-  data_t wo_arr [D_MODEL][D_MODEL];
-  data_t w1_arr [D_MODEL][D_FF];
-  data_t w2_arr [D_FF][D_MODEL];
+  reg signed [15:0] wq_arr [D_MODEL][D_MODEL];
+  reg signed [15:0] wk_arr [D_MODEL][D_MODEL];
+  reg signed [15:0] wv_arr [D_MODEL][D_MODEL];
+  reg signed [15:0] wo_arr [D_MODEL][D_MODEL];
+  reg signed [15:0] w1_arr [D_MODEL][D_FF];
+  reg signed [15:0] w2_arr [D_FF][D_MODEL];
   logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ln1_gamma;
   logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ln1_beta;
   logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ln2_gamma;
   logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ln2_beta;
-  data_t b1_arr [D_FF];
+  reg signed [15:0] b1_arr [D_FF];
   logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] b2_arr;
 
   // Pre-computed address offsets for write-through
@@ -144,7 +145,7 @@ module transformer_decoder_top
   assign wl_off_w2  = wl_addr - BASE_W2;
 
   // Write-through: update register arrays on wl_en writes
-  always_ff @(posedge clk) begin
+  always @(posedge clk) begin
     if (we_wq) wq_arr[wl_off_4k / D_MODEL][wl_off_4k % D_MODEL] <= wl_data;
     if (we_wk) wk_arr[wl_off_4k / D_MODEL][wl_off_4k % D_MODEL] <= wl_data;
     if (we_wv) wv_arr[wl_off_4k / D_MODEL][wl_off_4k % D_MODEL] <= wl_data;
@@ -168,32 +169,32 @@ module transformer_decoder_top
 
   bram_sp #(.DATA_WIDTH(DATA_WIDTH), .DEPTH(D_MODEL*D_MODEL), .INIT_FILE(WQ_INIT)) u_wq (
     .clk(clk), .we(we_wq),
-    .addr(we_wq ? wl_addr[$clog2(D_MODEL*D_MODEL)-1:0] : '0),
+    .addr(we_wq ? wl_addr[$clog2(D_MODEL*D_MODEL)-1:0] : 0),
     .wdata(wl_data), .rdata()
   );
   bram_sp #(.DATA_WIDTH(DATA_WIDTH), .DEPTH(D_MODEL*D_MODEL), .INIT_FILE(WK_INIT)) u_wk (
     .clk(clk), .we(we_wk),
-    .addr(we_wk ? wl_addr[$clog2(D_MODEL*D_MODEL)-1:0] : '0),
+    .addr(we_wk ? wl_addr[$clog2(D_MODEL*D_MODEL)-1:0] : 0),
     .wdata(wl_data), .rdata()
   );
   bram_sp #(.DATA_WIDTH(DATA_WIDTH), .DEPTH(D_MODEL*D_MODEL), .INIT_FILE(WV_INIT)) u_wv (
     .clk(clk), .we(we_wv),
-    .addr(we_wv ? wl_addr[$clog2(D_MODEL*D_MODEL)-1:0] : '0),
+    .addr(we_wv ? wl_addr[$clog2(D_MODEL*D_MODEL)-1:0] : 0),
     .wdata(wl_data), .rdata()
   );
   bram_sp #(.DATA_WIDTH(DATA_WIDTH), .DEPTH(D_MODEL*D_MODEL), .INIT_FILE(WO_INIT)) u_wo (
     .clk(clk), .we(we_wo),
-    .addr(we_wo ? wl_addr[$clog2(D_MODEL*D_MODEL)-1:0] : '0),
+    .addr(we_wo ? wl_addr[$clog2(D_MODEL*D_MODEL)-1:0] : 0),
     .wdata(wl_data), .rdata()
   );
   bram_sp #(.DATA_WIDTH(DATA_WIDTH), .DEPTH(D_MODEL*D_FF), .INIT_FILE(W1_INIT)) u_w1 (
     .clk(clk), .we(we_w1),
-    .addr(we_w1 ? wl_addr[$clog2(D_MODEL*D_FF)-1:0] : '0),
+    .addr(we_w1 ? wl_addr[$clog2(D_MODEL*D_FF)-1:0] : 0),
     .wdata(wl_data), .rdata()
   );
   bram_sp #(.DATA_WIDTH(DATA_WIDTH), .DEPTH(D_FF*D_MODEL), .INIT_FILE(W2_INIT)) u_w2 (
     .clk(clk), .we(we_w2),
-    .addr(we_w2 ? (wl_addr - BASE_W2) : '0),
+    .addr(we_w2 ? (wl_addr - BASE_W2) : 0),
     .wdata(wl_data), .rdata()
   );
   bram_sp #(.DATA_WIDTH(DATA_WIDTH), .DEPTH(D_MODEL), .INIT_FILE(LN1G_INIT)) u_ln1g (
@@ -233,27 +234,27 @@ module transformer_decoder_top
   logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] k_cache_wr_vec;
   logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] v_cache_wr_vec;
   logic  cache_wr_en;
-  data_t k_cache_arr [MAX_SEQ_LEN][D_MODEL];
-  data_t v_cache_arr [MAX_SEQ_LEN][D_MODEL];
+  reg signed [15:0] k_cache_arr [MAX_SEQ_LEN][D_MODEL];
+  reg signed [15:0] v_cache_arr [MAX_SEQ_LEN][D_MODEL];
 
   kv_cache_bram u_k_cache (
     .clk(clk), .rst_n(rst_n),
     .wr_start(cache_wr_en), .wr_seq_pos(seq_pos), .wr_vec(k_cache_wr_vec),
     .wr_done(),
-    .rd_pos('0), .rd_dim('0), .rd_data()
+    .rd_pos(7'b0), .rd_dim(6'b0), .rd_data()
   );
 
   kv_cache_bram u_v_cache (
     .clk(clk), .rst_n(rst_n),
     .wr_start(cache_wr_en), .wr_seq_pos(seq_pos), .wr_vec(v_cache_wr_vec),
     .wr_done(),
-    .rd_pos('0), .rd_dim('0), .rd_data()
+    .rd_pos(7'b0), .rd_dim(6'b0), .rd_data()
   );
 
   // Mirror cache writes into the register array for the decoder
-  always_ff @(posedge clk) begin
+  always @(posedge clk) begin
     if (cache_wr_en) begin
-      for (int d = 0; d < D_MODEL; d++) begin
+      for (d = 0; d < D_MODEL; d = d + 1) begin
         k_cache_arr[seq_pos][d] <= k_cache_wr_vec[d];
         v_cache_arr[seq_pos][d] <= v_cache_wr_vec[d];
       end

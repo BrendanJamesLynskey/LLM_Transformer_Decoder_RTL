@@ -7,8 +7,8 @@ module tb_processing_element;
   import transformer_pkg::*;
 
   logic  clk, rst_n, clear, enable;
-  data_t a_in, w_in, a_out, w_out;
-  acc_t  acc_out;
+  reg signed [15:0] a_in, w_in, a_out, w_out;
+  reg signed [31:0]  acc_out;
 
   processing_element dut (.*);
 
@@ -19,26 +19,26 @@ module tb_processing_element;
   // =========================================================================
   // Test Tasks
   // =========================================================================
-  task automatic reset();
+  task automatic reset;
     rst_n = 0;
     clear = 0;
     enable = 0;
-    a_in = '0;
-    w_in = '0;
+    a_in = 0;
+    w_in = 0;
     repeat (3) @(posedge clk);
     rst_n = 1;
     @(posedge clk);
   endtask
 
-  task automatic mac_cycle(input data_t a, input data_t w);
+  task automatic mac_cycle(input signed [15:0] a, input signed [15:0] w);
     @(posedge clk);
     enable = 1;
     a_in = a;
     w_in = w;
     @(posedge clk);
     enable = 0;
-    a_in = '0;
-    w_in = '0;
+    a_in = 0;
+    w_in = 0;
   endtask
 
   // =========================================================================
@@ -53,8 +53,8 @@ module tb_processing_element;
     $display("============================================");
 
     // Test 1: Reset clears accumulator
-    reset();
-    assert(acc_out == 0) begin
+    reset;
+    if (acc_out == 0) begin
       $display("[PASS] Reset: acc = 0");
       pass_count++;
     end else begin
@@ -68,7 +68,7 @@ module tb_processing_element;
     @(posedge clk); // Pipeline delay
     $display("  MAC 2.0 * 3.0: acc = %0d (hex: %h)", acc_out, acc_out);
     // Expected: 0x0200 * 0x0300 = 0x60000 (in acc_t full precision)
-    assert(acc_out == 32'sh00060000) begin
+    if (acc_out == 32'sh00060000) begin
       $display("[PASS] MAC 2.0 * 3.0 = correct");
       pass_count++;
     end else begin
@@ -81,7 +81,7 @@ module tb_processing_element;
     @(posedge clk);
     $display("  Accumulated: acc = %h", acc_out);
     // 0x60000 + 0x10000 = 0x70000
-    assert(acc_out == 32'sh00070000) begin
+    if (acc_out == 32'sh00070000) begin
       $display("[PASS] Accumulation correct");
       pass_count++;
     end else begin
@@ -96,7 +96,7 @@ module tb_processing_element;
     w_in = 16'sh0042;
     @(posedge clk);
     @(posedge clk); // One cycle latency
-    assert(a_out == 16'sh00FF && w_out == 16'sh0042) begin
+    if (a_out == 16'sh00FF && w_out == 16'sh0042) begin
       $display("[PASS] Data forwarding correct");
       pass_count++;
     end else begin
@@ -111,7 +111,7 @@ module tb_processing_element;
     @(posedge clk);
     clear = 0;
     @(posedge clk);
-    assert(acc_out == 0) begin
+    if (acc_out == 0) begin
       $display("[PASS] Clear works");
       pass_count++;
     end else begin
@@ -126,7 +126,7 @@ module tb_processing_element;
     $display("  MAC -1.5 * 2.0: acc = %h", acc_out);
     // -1.5 * 2.0 = -3.0 → in full precision: 0xFE80 * 0x0200 sign-extended
     // -384 * 512 = -196608 = 0xFFFCFE80... let's just check sign
-    assert(acc_out[ACC_WIDTH-1] == 1'b1) begin
+    if (acc_out[ACC_WIDTH-1] == 1'b1) begin
       $display("[PASS] Negative result (sign correct)");
       pass_count++;
     end else begin

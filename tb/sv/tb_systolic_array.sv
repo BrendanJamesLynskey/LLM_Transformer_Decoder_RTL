@@ -17,6 +17,7 @@ module tb_systolic_array;
 
   systolic_array #(.ROWS(ROWS), .COLS(COLS)) dut (.*);
 
+  integer c, cycle, i, r;
   // Clock: 100 MHz
   initial clk = 0;
   always #5 clk = ~clk;
@@ -40,8 +41,8 @@ module tb_systolic_array;
     rst_n = 0;
     clear = 0;
     enable = 0;
-    for (int i = 0; i < ROWS; i++) a_in[i] = '0;
-    for (int i = 0; i < COLS; i++) b_in[i] = '0;
+    for (i = 0; i < ROWS; i = i + 1) a_in[i] = 0;
+    for (i = 0; i < COLS; i = i + 1) b_in[i] = 0;
     repeat (4) @(posedge clk);
     rst_n = 1;
     @(posedge clk);
@@ -58,39 +59,39 @@ module tb_systolic_array;
 
     // Cycle 0: Feed first values
     a_in[0] = 16'sh0100; // 1.0
-    a_in[1] = '0;
-    a_in[2] = '0;
-    a_in[3] = '0;
+    a_in[1] = 0;
+    a_in[2] = 0;
+    a_in[3] = 0;
     b_in[0] = 16'sh0200; // 2.0
-    b_in[1] = '0;
-    b_in[2] = '0;
-    b_in[3] = '0;
+    b_in[1] = 0;
+    b_in[2] = 0;
+    b_in[3] = 0;
     @(posedge clk);
 
     // Cycle 1
-    a_in[0] = '0;
+    a_in[0] = 0;
     a_in[1] = 16'sh0100; // 1.0
-    b_in[0] = '0;
+    b_in[0] = 0;
     b_in[1] = 16'sh0300; // 3.0
     @(posedge clk);
 
     // Cycle 2
-    a_in[1] = '0;
+    a_in[1] = 0;
     a_in[2] = 16'sh0100; // 1.0
-    b_in[1] = '0;
+    b_in[1] = 0;
     b_in[2] = 16'sh0400; // 4.0
     @(posedge clk);
 
     // Cycle 3
-    a_in[2] = '0;
+    a_in[2] = 0;
     a_in[3] = 16'sh0100; // 1.0
-    b_in[2] = '0;
+    b_in[2] = 0;
     b_in[3] = 16'sh0500; // 5.0
     @(posedge clk);
 
     // Drain cycles
-    for (int i = 0; i < ROWS; i++) a_in[i] = '0;
-    for (int i = 0; i < COLS; i++) b_in[i] = '0;
+    for (i = 0; i < ROWS; i = i + 1) a_in[i] = 0;
+    for (i = 0; i < COLS; i = i + 1) b_in[i] = 0;
     repeat (ROWS + COLS) @(posedge clk);
     enable = 0;
 
@@ -99,9 +100,9 @@ module tb_systolic_array;
     @(posedge clk);
 
     $display("  Result matrix (raw accumulator values):");
-    for (int r = 0; r < ROWS; r++) begin
+    for (r = 0; r < ROWS; r = r + 1) begin
       $write("  Row %0d: ", r);
-      for (int c = 0; c < COLS; c++)
+      for (c = 0; c < COLS; c = c + 1)
         $write("%8h ", result[r*COLS+c]);
       $display("");
     end
@@ -143,15 +144,15 @@ module tb_systolic_array;
     // ---- Test 4: All ones multiply ----
     $display("\n--- Test 4: Uniform 1.0 input ---");
     enable = 1;
-    for (int cycle = 0; cycle < ROWS + COLS; cycle++) begin
-      for (int i = 0; i < ROWS; i++)
-        a_in[i] = (cycle < ROWS) ? 16'sh0100 : '0; // 1.0
-      for (int i = 0; i < COLS; i++)
-        b_in[i] = (cycle < COLS) ? 16'sh0100 : '0;  // 1.0
+    for (cycle = 0; cycle < ROWS + COLS; cycle = cycle + 1) begin
+      for (i = 0; i < ROWS; i = i + 1)
+        a_in[i] = (cycle < ROWS) ? 16'sh0100 : 0; // 1.0
+      for (i = 0; i < COLS; i = i + 1)
+        b_in[i] = (cycle < COLS) ? 16'sh0100 : 0;  // 1.0
       @(posedge clk);
     end
-    for (int i = 0; i < ROWS; i++) a_in[i] = '0;
-    for (int i = 0; i < COLS; i++) b_in[i] = '0;
+    for (i = 0; i < ROWS; i = i + 1) a_in[i] = 0;
+    for (i = 0; i < COLS; i = i + 1) b_in[i] = 0;
     repeat (4) @(posedge clk);
     enable = 0;
 

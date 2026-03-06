@@ -29,7 +29,7 @@ module bram_sp
   input  logic                       we,       // Write enable
   input  logic [$clog2(DEPTH)-1:0]   addr,     // Read/write address
   input  logic [DATA_WIDTH-1:0]      wdata,    // Write data
-  output logic [DATA_WIDTH-1:0]      rdata     // Read data (1-cycle latency)
+  output reg [DATA_WIDTH-1:0]      rdata     // Read data (1-cycle latency)
 );
 
   // Memory array
@@ -43,7 +43,7 @@ module bram_sp
   end
 
   // Synchronous read/write (read-first)
-  always_ff @(posedge clk) begin
+  always @(posedge clk) begin
     rdata <= mem[addr];
     if (we)
       mem[addr] <= wdata;

@@ -1,0 +1,11 @@
+<testsuites name="results">
+  <testsuite name="all" package="all">
+    <property name="random_seed" value="1772812531" />
+    <testcase classname="test_softmax" file="/home/brendan/Claude_test/LLM_Transformer_Decoder_RTL/tb/cocotb/test_softmax.py" lineno="98" name="test_uniform_inputs" ratio_time="43144.93460690669" sim_time_ns="490.0" time="0.01135706901550293" />
+    <testcase classname="test_softmax" file="/home/brendan/Claude_test/LLM_Transformer_Decoder_RTL/tb/cocotb/test_softmax.py" lineno="124" name="test_dominant_score" ratio_time="48319.24796092346" sim_time_ns="500.0" time="0.010347843170166016" />
+    <testcase classname="test_softmax" file="/home/brendan/Claude_test/LLM_Transformer_Decoder_RTL/tb/cocotb/test_softmax.py" lineno="144" name="test_negative_scores" ratio_time="44923.24829166934" sim_time_ns="500.0" time="0.011130094528198242" />
+    <testcase classname="test_softmax" file="/home/brendan/Claude_test/LLM_Transformer_Decoder_RTL/tb/cocotb/test_softmax.py" lineno="162" name="test_probability_sum" ratio_time="46866.873756899906" sim_time_ns="500.0" time="0.010668516159057617" />
+    <testcase classname="test_softmax" file="/home/brendan/Claude_test/LLM_Transformer_Decoder_RTL/tb/cocotb/test_softmax.py" lineno="180" name="test_ordering_preserved" ratio_time="46078.08757937293" sim_time_ns="500.0" time="0.010851144790649414" />
+    <testcase classname="test_softmax" file="/home/brendan/Claude_test/LLM_Transformer_Decoder_RTL/tb/cocotb/test_softmax.py" lineno="199" name="test_back_to_back" ratio_time="43097.0317982576" sim_time_ns="940.0" time="0.021811246871948242" />
+  </testsuite>
+</testsuites>

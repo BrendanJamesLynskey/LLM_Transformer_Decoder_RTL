@@ -15,6 +15,6 @@ MODULE = test_softmax
 
 # Icarus Verilog flags
 COMPILE_ARGS += -g2012
-COMPILE_ARGS += -PVEC_LEN=8
+COMPILE_ARGS += -Psoftmax_unit.VEC_LEN=8
 
 include $(shell cocotb-config --makefiles)/Makefile.sim

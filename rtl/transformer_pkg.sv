@@ -10,36 +10,32 @@ package transformer_pkg;
   // =========================================================================
   // Model Architecture Parameters
   // =========================================================================
-  parameter int D_MODEL      = 64;    // Model embedding dimension
-  parameter int N_HEADS      = 4;     // Number of attention heads
-  parameter int D_HEAD       = D_MODEL / N_HEADS; // Per-head dimension (16)
-  parameter int D_FF         = 256;   // Feed-forward inner dimension (4x)
-  parameter int MAX_SEQ_LEN  = 128;   // Maximum sequence length
-  parameter int VOCAB_SIZE   = 512;   // Vocabulary size
+  localparam int D_MODEL      = 64;    // Model embedding dimension
+  localparam int N_HEADS      = 4;     // Number of attention heads
+  localparam int D_HEAD       = D_MODEL / N_HEADS; // Per-head dimension (16)
+  localparam int D_FF         = 256;   // Feed-forward inner dimension (4x)
+  localparam int MAX_SEQ_LEN  = 128;   // Maximum sequence length
+  localparam int VOCAB_SIZE   = 512;   // Vocabulary size
 
   // =========================================================================
   // Fixed-Point Arithmetic Parameters (Q8.8 format)
   // =========================================================================
-  parameter int DATA_WIDTH   = 16;    // Total bit width
-  parameter int FRAC_BITS    = 8;     // Fractional bits
-  parameter int INT_BITS     = DATA_WIDTH - FRAC_BITS; // Integer bits
+  localparam int DATA_WIDTH   = 16;    // Total bit width
+  localparam int FRAC_BITS    = 8;     // Fractional bits
+  localparam int INT_BITS     = DATA_WIDTH - FRAC_BITS; // Integer bits
 
   // Accumulator uses wider precision to prevent overflow
-  parameter int ACC_WIDTH    = 32;    // Accumulator width for MAC operations
+  localparam int ACC_WIDTH    = 32;    // Accumulator width for MAC operations
 
   // =========================================================================
   // Hardware Configuration
   // =========================================================================
-  parameter int PE_ROWS      = 4;     // Systolic array rows
-  parameter int PE_COLS      = 4;     // Systolic array columns
+  localparam int PE_ROWS      = 4;     // Systolic array rows
+  localparam int PE_COLS      = 4;     // Systolic array columns
 
   // =========================================================================
   // Types
   // =========================================================================
-  typedef logic signed [DATA_WIDTH-1:0]  data_t;     // Q8.8 fixed-point
-  typedef logic signed [ACC_WIDTH-1:0]   acc_t;      // Accumulator
-  typedef logic [$clog2(MAX_SEQ_LEN)-1:0] seq_idx_t; // Sequence index
-  typedef logic [$clog2(VOCAB_SIZE)-1:0]  vocab_idx_t;// Vocab index
 
   // =========================================================================
   // Packed Array Types (for module ports — iverilog compatibility)
@@ -47,26 +43,31 @@ package transformer_pkg;
   // iverilog 12.0 cannot propagate values through unpacked array ports.
   // These packed types are used at module boundaries; internal logic may
   // freely use unpacked arrays with pack/unpack helper macros.
-  typedef logic signed [D_MODEL-1:0][DATA_WIDTH-1:0]     model_vec_t;   // D_MODEL-wide vector
-  typedef logic signed [D_FF-1:0][DATA_WIDTH-1:0]        ff_vec_t;      // D_FF-wide vector
-  typedef logic signed [D_MODEL-1:0][D_MODEL-1:0][DATA_WIDTH-1:0] model_mat_t; // D_MODEL×D_MODEL matrix
-  typedef logic signed [D_MODEL-1:0][D_FF-1:0][DATA_WIDTH-1:0]    model_ff_mat_t; // D_MODEL×D_FF matrix
-  typedef logic signed [D_FF-1:0][D_MODEL-1:0][DATA_WIDTH-1:0]    ff_model_mat_t; // D_FF×D_MODEL matrix
-  typedef logic signed [MAX_SEQ_LEN-1:0][D_MODEL-1:0][DATA_WIDTH-1:0] cache_t; // Cache matrix
+
+  // =========================================================================
+  // Type Cast Helpers (iverilog 10.1 compatibility)
+  // =========================================================================
+  function automatic signed [31:0] to_acc(input signed [15:0] val);
+    to_acc = {{16{val[15]}}, val};
+  endfunction
+
+  function automatic signed [15:0] to_data(input signed [31:0] val);
+    to_data = val[15:0];
+  endfunction
 
   // =========================================================================
   // Fixed-Point Utility Functions
   // =========================================================================
 
   // Multiply two Q8.8 values, return Q8.8 (truncated)
-  function automatic data_t fp_mul(input data_t a, input data_t b);
+  function automatic signed [15:0] fp_mul(input signed [15:0] a, input signed [15:0] b);
     logic signed [2*DATA_WIDTH-1:0] product;
     product = a * b;
-    return data_t'(product >>> FRAC_BITS);
+    return to_data(product >>> FRAC_BITS);
   endfunction
 
   // Saturating add for Q8.8
-  function automatic data_t fp_sat_add(input data_t a, input data_t b);
+  function automatic signed [15:0] fp_sat_add(input signed [15:0] a, input signed [15:0] b);
     logic signed [DATA_WIDTH:0] sum;
     sum = {a[DATA_WIDTH-1], a} + {b[DATA_WIDTH-1], b};
     if (sum > $signed({1'b0, {(DATA_WIDTH-1){1'b1}}}))
@@ -74,12 +75,12 @@ package transformer_pkg;
     else if (sum < $signed({1'b1, {(DATA_WIDTH-1){1'b0}}}))
       return {1'b1, {(DATA_WIDTH-1){1'b0}}}; // Min negative
     else
-      return data_t'(sum[DATA_WIDTH-1:0]);
+      return to_data(sum[DATA_WIDTH-1:0]);
   endfunction
 
   // Convert integer to Q8.8
-  function automatic data_t int_to_fp(input int val);
-    return data_t'(val <<< FRAC_BITS);
+  function automatic signed [15:0] int_to_fp(input signed [31:0] val);
+    return to_data(val <<< FRAC_BITS);
   endfunction
 
   // Reciprocal square root: 1/sqrt(x) in Q8.8
@@ -102,7 +103,7 @@ package transformer_pkg;
   //   √2 ≈ 1.4142 in Q2.14 = 23170
 
   // 32-entry rsqrt LUT: 1/√(0.5 + k/64 + 1/128) in Q2.14
-  function automatic logic [15:0] rsqrt_lut(input logic [4:0] index);
+  function automatic [15:0] rsqrt_lut(input logic [4:0] index);
     case (index)
       5'd0:  return 16'd22992;  // 1/sqrt(0.5078)
       5'd1:  return 16'd22646;  // 1/sqrt(0.5234)
@@ -140,15 +141,18 @@ package transformer_pkg;
   endfunction
 
   // Count leading zeros for 16-bit unsigned value
-  function automatic logic [3:0] clz16(input logic [15:0] val);
-    for (int i = 15; i >= 0; i--) begin
-      if (val[i]) return 4'(15 - i);
+  function automatic [3:0] clz16(input logic [15:0] val);
+    integer i;
+    for (i = 15; i >= 0; i--) begin
+      if (val[i]) return (15 - i);
     end
     return 4'd15;
   endfunction
 
   // Compute 1/sqrt(x) for Q8.8 input, returning Q8.8 result.
-  function automatic data_t fp_inv_sqrt(input data_t x);
+  // Note: all logic declarations at function scope (not in nested begin blocks)
+  // to avoid iverilog 10.1 runtime crash (vthread_get_rd_context_item assertion).
+  function automatic signed [15:0] fp_inv_sqrt(input signed [15:0] x);
     logic [15:0] xu;         // Unsigned version of x (variance is always >= 0)
     logic [3:0]  lz;         // Leading zero count
     logic [15:0] x_norm;     // Normalised to [0.5, 1.0) in Q0.16
@@ -162,6 +166,10 @@ package transformer_pkg;
     logic [31:0] r1_wide;    // r0 * three_minus
     logic [15:0] r1;         // >> 15 (the /2 from the formula + alignment)
     logic [15:0] result;
+    logic signed [4:0] e;         // lz - 8, range [-8, +7]
+    logic        e_odd;
+    logic signed [4:0] shift_amt;
+    logic [31:0] r1_adj;          // r1 or r1 * sqrt(2)
 
     // Handle edge cases
     if (x <= 0) return int_to_fp(1);        // 1/sqrt(0) -> clamp to 1.0
@@ -175,16 +183,10 @@ package transformer_pkg;
 
     // Step 2: LUT lookup
     lut_idx = x_norm[14:10];
-    r0 = rsqrt_lut(lut_idx);  // ≈ 1/√x_norm in Q2.14
+    r0 = rsqrt_lut(lut_idx);  // ~= 1/sqrt(x_norm) in Q2.14
 
     // Step 3: Newton-Raphson iteration
     //   r1 = r0 * (3 - x_norm * r0^2) / 2
-    //
-    // All arithmetic in Q2.14 domain:
-    //   r0^2: Q2.14 * Q2.14 = Q4.28; >> 14 gives Q4.14, but values in [1,2] so Q2.14 ok
-    //   x_norm * r0^2: Q0.16 * Q2.14 = 32-bit; >> 16 gives Q2.14
-    //   3.0 in Q2.14 = 49152
-    //   r0 * (3 - x*r0^2): Q2.14 * Q2.14 = Q4.28; >> 15 gives Q2.14 (the /2)
     r0_sq = {16'b0, r0} * {16'b0, r0};
     r0_sq_16 = r0_sq[29:14];           // >> 14, keep Q2.14
     xr2 = {16'b0, x_norm} * {16'b0, r0_sq_16};
@@ -194,48 +196,26 @@ package transformer_pkg;
     r1 = r1_wide[29:15];               // >> 15 = (>> 14 for Q alignment) then /2
 
     // Step 4: Denormalise
-    // r1 ≈ 1/√x_norm in Q2.14 where x_norm = xu << lz (Q0.16).
-    // xu = x in Q8.8 raw bits.  float_val = xu * 2^(-8).
-    // x_norm_float = x_norm * 2^(-16) = xu * 2^(lz-16) = float_val * 2^(lz-8).
-    //
-    // 1/√float_val = 1/√x_norm_float * 2^((lz-8)/2)
-    //              = r1 * 2^(-14) * 2^((lz-8)/2)
-    //
-    // In Q8.8: result = 1/√float_val * 2^8 = r1 * 2^((lz-8)/2 - 6)
-    //
-    // Let e = lz - 8 (signed, range -8..+7 for typical inputs).
-    // If e is even:  result = r1 >> (6 - e/2)
-    // If e is odd:   result = (r1 * √2) >> (6 - (e-1)/2)
-    //   where √2 in Q2.14 = 23170, and the multiply is done first to
-    //   preserve precision before the right-shift.
-    //
-    // Note: for lz > 12 (very small inputs), 6 - e/2 < 0, meaning left-shift.
+    // r1 ~= 1/sqrt(x_norm) in Q2.14 where x_norm = xu << lz (Q0.16).
+    // Result in Q8.8: r1 * 2^((lz-8)/2 - 6)
+    // For odd e: multiply by sqrt(2) ~= 23170 in Q2.14
+    e = {1'b0, lz} - 5'sd8;
+    e_odd = e[0];
 
-    begin
-      logic signed [4:0] e;         // lz - 8, range [-8, +7]
-      logic        e_odd;
-      logic signed [4:0] shift_amt;
-      logic [31:0] r1_adj;          // r1 or r1 * √2
-
-      e = {1'b0, lz} - 5'sd8;
-      e_odd = e[0];
-
-      if (e_odd) begin
-        // Odd e: multiply r1 by √2 first (in full precision), then shift
-        r1_adj = {16'b0, r1} * 32'd23170;
-        r1_adj = {18'b0, r1_adj[31:14]};    // >> 14, back to Q2.14 range
-        shift_amt = 5'sd6 - (e - 5'sd1) / 5'sd2;
-      end else begin
-        r1_adj = {16'b0, r1};
-        shift_amt = 5'sd6 - e / 5'sd2;
-      end
-
-      // Apply shift (positive = right-shift, negative = left-shift)
-      if (shift_amt >= 0)
-        result = r1_adj[15:0] >> shift_amt[3:0];
-      else
-        result = r1_adj[15:0] << (-shift_amt[3:0]);
+    if (e_odd) begin
+      r1_adj = {16'b0, r1} * 32'd23170;
+      r1_adj = {18'b0, r1_adj[31:14]};    // >> 14, back to Q2.14 range
+      shift_amt = 5'sd6 - (e - 5'sd1) / 5'sd2;
+    end else begin
+      r1_adj = {16'b0, r1};
+      shift_amt = 5'sd6 - e / 5'sd2;
     end
+
+    // Apply shift (positive = right-shift, negative = left-shift)
+    if (shift_amt >= 0)
+      result = r1_adj[15:0] >> shift_amt[3:0];
+    else
+      result = r1_adj[15:0] << (-shift_amt[3:0]);
 
     // Clamp to max positive Q8.8
     if (result > 16'h7FFF)
@@ -243,7 +223,7 @@ package transformer_pkg;
     else if (result == 0)
       return 16'sh0001;  // Minimum non-zero
     else
-      return data_t'(result);
+      return to_data(result);
   endfunction
 
 endpackage

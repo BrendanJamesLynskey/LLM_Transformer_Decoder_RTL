@@ -31,15 +31,15 @@ module kv_cache_bram
 
   // --- Write interface (port A): write a full vector at seq_pos ---
   input  logic                              wr_start,     // Pulse to begin write
-  input  seq_idx_t                          wr_seq_pos,   // Which position to write
+  input  [6:0]                          wr_seq_pos,   // Which position to write
   input  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] wr_vec, // Vector to write (packed)
 
-  output logic                              wr_done,      // Pulses when write complete
+  output reg                              wr_done,      // Pulses when write complete
 
   // --- Element read interface (port B) ---
-  input  seq_idx_t                          rd_pos,       // Sequence position to read
+  input  [6:0]                          rd_pos,       // Sequence position to read
   input  logic [$clog2(D_MODEL)-1:0]        rd_dim,       // Dimension to read
-  output data_t                             rd_data       // Data (1-cycle latency)
+  output reg signed [15:0]                             rd_data       // Data (1-cycle latency)
 );
 
   localparam int DEPTH  = MAX_SEQ_LEN * D_MODEL;
@@ -74,21 +74,19 @@ module kv_cache_bram
   // =========================================================================
   // Write FSM — writes D_MODEL elements sequentially via port A
   // =========================================================================
-  typedef enum logic [1:0] {
-    WR_IDLE,
-    WR_ACTIVE,
-    WR_DONE
-  } wr_state_t;
+  localparam [1:0] WR_IDLE = 0;
+  localparam [1:0] WR_ACTIVE = 1;
+  localparam [1:0] WR_DONE = 2;
 
-  wr_state_t wr_state, wr_state_next;
+  reg [1:0] wr_state, wr_state_next;
   logic [$clog2(D_MODEL):0] wr_dim_idx;
-  seq_idx_t wr_pos_reg;
+  reg [6:0] wr_pos_reg;
 
-  always_ff @(posedge clk or negedge rst_n) begin
+  always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       wr_state   <= WR_IDLE;
-      wr_dim_idx <= '0;
-      wr_pos_reg <= '0;
+      wr_dim_idx <= 0;
+      wr_pos_reg <= 0;
       wr_done    <= 1'b0;
     end else begin
       wr_state <= wr_state_next;
@@ -98,12 +96,12 @@ module kv_cache_bram
         WR_IDLE: begin
           if (wr_start) begin
             wr_pos_reg <= wr_seq_pos;
-            wr_dim_idx <= '0;
+            wr_dim_idx <= 0;
           end
         end
 
         WR_ACTIVE: begin
-          if (wr_dim_idx < D_MODEL[$clog2(D_MODEL):0]) begin
+          if (wr_dim_idx < D_MODEL) begin
             wr_dim_idx <= wr_dim_idx + 1;
           end else begin
             wr_done <= 1'b1;
@@ -115,26 +113,26 @@ module kv_cache_bram
     end
   end
 
-  always_comb begin
+  always @(*) begin
     wr_state_next = wr_state;
     case (wr_state)
       WR_IDLE:   if (wr_start) wr_state_next = WR_ACTIVE;
-      WR_ACTIVE: if (wr_dim_idx >= D_MODEL[$clog2(D_MODEL):0]) wr_state_next = WR_DONE;
+      WR_ACTIVE: if (wr_dim_idx >= D_MODEL) wr_state_next = WR_DONE;
       WR_DONE:   wr_state_next = WR_IDLE;
       default:   wr_state_next = WR_IDLE;
     endcase
   end
 
   // Port A: write address generation
-  always_comb begin
-    if (wr_state == WR_ACTIVE && wr_dim_idx < D_MODEL[$clog2(D_MODEL):0]) begin
+  always @(*) begin
+    if (wr_state == WR_ACTIVE && wr_dim_idx < D_MODEL) begin
       a_we    = 1'b1;
-      a_addr  = ADDR_W'({1'b0, wr_pos_reg} * D_MODEL + wr_dim_idx);
+      a_addr  = ({1'b0, wr_pos_reg} * D_MODEL + wr_dim_idx);
       a_wdata = wr_vec[wr_dim_idx];
     end else begin
       a_we    = 1'b0;
-      a_addr  = '0;
-      a_wdata = '0;
+      a_addr  = 0;
+      a_wdata = 0;
     end
   end
 
@@ -142,8 +140,8 @@ module kv_cache_bram
   // Read Interface — port B, combinational address, 1-cycle data latency
   // =========================================================================
   assign b_we    = 1'b0;
-  assign b_wdata = '0;
-  assign b_addr  = ADDR_W'({1'b0, rd_pos} * D_MODEL + {1'b0, rd_dim});
-  assign rd_data = data_t'(b_rdata);
+  assign b_wdata = 0;
+  assign b_addr  = ({1'b0, rd_pos} * D_MODEL + {1'b0, rd_dim});
+  assign rd_data = to_data(b_rdata);
 
 endmodule

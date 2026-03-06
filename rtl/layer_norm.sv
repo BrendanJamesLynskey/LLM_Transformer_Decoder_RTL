@@ -28,46 +28,45 @@ module layer_norm
   input  logic signed [VEC_LEN-1:0][DATA_WIDTH-1:0] gamma,  // Scale parameters
   input  logic signed [VEC_LEN-1:0][DATA_WIDTH-1:0] beta,   // Bias parameters
 
-  output logic signed [VEC_LEN-1:0][DATA_WIDTH-1:0] y_out,  // Normalized output
-  output logic   valid
+  output reg signed [VEC_LEN-1:0][DATA_WIDTH-1:0] y_out,  // Normalized output
+  output reg   valid
 );
 
-  typedef enum logic [2:0] {
-    S_IDLE,
-    S_MEAN,
-    S_VARIANCE,
-    S_NORMALIZE,
-    S_DONE
-  } state_t;
+  integer i;
+  localparam [2:0] S_IDLE = 0;
+  localparam [2:0] S_MEAN = 1;
+  localparam [2:0] S_VARIANCE = 2;
+  localparam [2:0] S_NORMALIZE = 3;
+  localparam [2:0] S_DONE = 4;
 
-  state_t state, state_next;
+  reg [2:0] state, state_next;
 
-  acc_t   sum_acc;
-  acc_t   var_acc;
-  data_t  mean_val;
-  data_t  var_val;
-  data_t  inv_std;
+  reg signed [31:0]   sum_acc;
+  reg signed [31:0]   var_acc;
+  reg signed [15:0]  mean_val;
+  reg signed [15:0]  var_val;
+  reg signed [15:0]  inv_std;
   logic [$clog2(VEC_LEN):0] idx;
 
   // Intermediate: x - mean
-  data_t centered [VEC_LEN];
+  reg signed [15:0] centered [VEC_LEN];
 
   // =========================================================================
   // Sequential Logic
   // =========================================================================
-  always_ff @(posedge clk or negedge rst_n) begin
+  always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       state    <= S_IDLE;
-      sum_acc  <= '0;
-      var_acc  <= '0;
-      mean_val <= '0;
-      var_val  <= '0;
-      inv_std  <= '0;
-      idx      <= '0;
+      sum_acc  <= 0;
+      var_acc  <= 0;
+      mean_val <= 0;
+      var_val  <= 0;
+      inv_std  <= 0;
+      idx      <= 0;
       valid    <= 1'b0;
-      for (int i = 0; i < VEC_LEN; i++) begin
-        y_out[i]    <= '0;
-        centered[i] <= '0;
+      for (i = 0; i < VEC_LEN; i = i + 1) begin
+        y_out[i]    <= 0;
+        centered[i] <= 0;
       end
     end else begin
       state <= state_next;
@@ -76,38 +75,38 @@ module layer_norm
         S_IDLE: begin
           valid <= 1'b0;
           if (start) begin
-            sum_acc <= '0;
-            var_acc <= '0;
-            idx     <= '0;
+            sum_acc <= 0;
+            var_acc <= 0;
+            idx     <= 0;
           end
         end
 
         S_MEAN: begin
-          if (idx < VEC_LEN[$clog2(VEC_LEN):0]) begin
-            sum_acc <= sum_acc + acc_t'(x_in[idx]);
+          if (idx < VEC_LEN) begin
+            sum_acc <= sum_acc + to_acc(x_in[idx]);
             idx <= idx + 1;
           end else begin
             // mean = sum / N via arithmetic right-shift (VEC_LEN is power of 2)
-            mean_val <= data_t'(sum_acc >>> $clog2(VEC_LEN));
-            idx      <= '0;
+            mean_val <= to_data(sum_acc >>> $clog2(VEC_LEN));
+            idx      <= 0;
           end
         end
 
         S_VARIANCE: begin
-          if (idx < VEC_LEN[$clog2(VEC_LEN):0]) begin
+          if (idx < VEC_LEN) begin
             centered[idx] <= x_in[idx] - mean_val;
-            var_acc <= var_acc + acc_t'(fp_mul(x_in[idx] - mean_val, x_in[idx] - mean_val));
+            var_acc <= var_acc + to_acc(fp_mul(x_in[idx] - mean_val, x_in[idx] - mean_val));
             idx <= idx + 1;
           end else begin
-            var_val <= data_t'(var_acc >>> $clog2(VEC_LEN));
+            var_val <= to_data(var_acc >>> $clog2(VEC_LEN));
             // Compute 1/sqrt(variance + epsilon) via LUT + Newton-Raphson
-            inv_std <= fp_inv_sqrt(data_t'(var_acc >>> $clog2(VEC_LEN)) + 16'sh0001);
-            idx     <= '0;
+            inv_std <= fp_inv_sqrt(to_data(var_acc >>> $clog2(VEC_LEN)) + 16'sh0001);
+            idx     <= 0;
           end
         end
 
         S_NORMALIZE: begin
-          if (idx < VEC_LEN[$clog2(VEC_LEN):0]) begin
+          if (idx < VEC_LEN) begin
             // y = gamma * (x - mean) * inv_std + beta
             y_out[idx] <= fp_sat_add(
               fp_mul(gamma[idx], fp_mul(centered[idx], inv_std)),
@@ -129,13 +128,13 @@ module layer_norm
   // =========================================================================
   // Next-State Logic
   // =========================================================================
-  always_comb begin
+  always @(*) begin
     state_next = state;
     case (state)
       S_IDLE:      if (start) state_next = S_MEAN;
-      S_MEAN:      if (idx >= VEC_LEN[$clog2(VEC_LEN):0]) state_next = S_VARIANCE;
-      S_VARIANCE:  if (idx >= VEC_LEN[$clog2(VEC_LEN):0]) state_next = S_NORMALIZE;
-      S_NORMALIZE: if (idx >= VEC_LEN[$clog2(VEC_LEN):0]) state_next = S_DONE;
+      S_MEAN:      if (idx >= VEC_LEN) state_next = S_VARIANCE;
+      S_VARIANCE:  if (idx >= VEC_LEN) state_next = S_NORMALIZE;
+      S_NORMALIZE: if (idx >= VEC_LEN) state_next = S_DONE;
       S_DONE:      state_next = S_IDLE;
       default:     state_next = S_IDLE;
     endcase

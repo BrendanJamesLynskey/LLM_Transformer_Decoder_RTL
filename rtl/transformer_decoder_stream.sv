@@ -32,71 +32,70 @@ module transformer_decoder_stream
   input  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ln2_beta,
 
   // Attention weight BRAM read interfaces
-  output logic [$clog2(D_MODEL*D_MODEL)-1:0] wqkv_rd_addr,
-  input  data_t  wq_rd_data,
-  input  data_t  wk_rd_data,
-  input  data_t  wv_rd_data,
-  output logic   wqkv_rd_en,
+  output reg [$clog2(D_MODEL*D_MODEL)-1:0] wqkv_rd_addr,
+  input  signed [15:0]  wq_rd_data,
+  input  signed [15:0]  wk_rd_data,
+  input  signed [15:0]  wv_rd_data,
+  output reg   wqkv_rd_en,
 
-  output logic [$clog2(D_MODEL*D_MODEL)-1:0] wo_rd_addr,
-  input  data_t  wo_rd_data,
-  output logic   wo_rd_en,
+  output reg [$clog2(D_MODEL*D_MODEL)-1:0] wo_rd_addr,
+  input  signed [15:0]  wo_rd_data,
+  output reg   wo_rd_en,
 
   // FFN weight BRAM read interfaces
-  output logic [$clog2(D_MODEL*D_FF)-1:0] w1_rd_addr,
-  input  data_t  w1_rd_data,
-  output logic   w1_rd_en,
+  output reg [$clog2(D_MODEL*D_FF)-1:0] w1_rd_addr,
+  input  signed [15:0]  w1_rd_data,
+  output reg   w1_rd_en,
 
-  output logic [$clog2(D_FF)-1:0] b1_rd_addr,
-  input  data_t  b1_rd_data,
-  output logic   b1_rd_en,
+  output reg [$clog2(D_FF)-1:0] b1_rd_addr,
+  input  signed [15:0]  b1_rd_data,
+  output reg   b1_rd_en,
 
-  output logic [$clog2(D_FF*D_MODEL)-1:0] w2_rd_addr,
-  input  data_t  w2_rd_data,
-  output logic   w2_rd_en,
+  output reg [$clog2(D_FF*D_MODEL)-1:0] w2_rd_addr,
+  input  signed [15:0]  w2_rd_data,
+  output reg   w2_rd_en,
 
   input  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ffn_b2,
 
   // Sequence position
-  input  seq_idx_t seq_pos,
+  input  [6:0] seq_pos,
 
   // KV-Cache write interface
-  output logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] k_cache_wr,
-  output logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] v_cache_wr,
-  output logic   cache_wr_en,
+  output reg signed [D_MODEL-1:0][DATA_WIDTH-1:0] k_cache_wr,
+  output reg signed [D_MODEL-1:0][DATA_WIDTH-1:0] v_cache_wr,
+  output reg   cache_wr_en,
 
   // KV-Cache BRAM read interfaces
-  output seq_idx_t              kcache_rd_pos,
-  output logic [$clog2(D_MODEL)-1:0] kcache_rd_dim,
-  input  data_t                 kcache_rd_data,
-  output seq_idx_t              vcache_rd_pos,
-  output logic [$clog2(D_MODEL)-1:0] vcache_rd_dim,
-  input  data_t                 vcache_rd_data,
+  output reg [6:0]              kcache_rd_pos,
+  output reg [$clog2(D_MODEL)-1:0] kcache_rd_dim,
+  input  signed [15:0]                 kcache_rd_data,
+  output reg [6:0]              vcache_rd_pos,
+  output reg [$clog2(D_MODEL)-1:0] vcache_rd_dim,
+  input  signed [15:0]                 vcache_rd_data,
 
   // Output (packed 1D)
-  output logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] out_emb,
-  output logic   valid
+  output reg signed [D_MODEL-1:0][DATA_WIDTH-1:0] out_emb,
+  output reg   valid
 );
 
+  integer i;
   // =========================================================================
   // Top-Level FSM
   // =========================================================================
-  typedef enum logic [3:0] {
-    S_IDLE,
-    S_LN1_START,
-    S_LN1_WAIT,
-    S_ATTN_START,
-    S_ATTN_WAIT,
-    S_RESIDUAL1,
-    S_LN2_START,
-    S_LN2_WAIT,
-    S_FFN_START,
-    S_FFN_WAIT,
-    S_RESIDUAL2,
-    S_DONE
-  } top_state_t;
+  localparam [3:0] S_IDLE = 0;
+  localparam [3:0] S_LN1_START = 1;
+  localparam [3:0] S_LN1_WAIT = 2;
+  localparam [3:0] S_ATTN_START = 3;
+  localparam [3:0] S_ATTN_WAIT = 4;
+  localparam [3:0] S_RESIDUAL1 = 5;
+  localparam [3:0] S_LN2_START = 6;
+  localparam [3:0] S_LN2_WAIT = 7;
+  localparam [3:0] S_FFN_START = 8;
+  localparam [3:0] S_FFN_WAIT = 9;
+  localparam [3:0] S_RESIDUAL2 = 10;
+  localparam [3:0] S_DONE = 11;
 
-  top_state_t state, state_next;
+  reg [3:0] state, state_next;
 
   // Intermediate signals
   logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ln1_out;
@@ -162,7 +161,7 @@ module transformer_decoder_stream
   // =========================================================================
   // Top-Level FSM — identical sequencing to original
   // =========================================================================
-  always_ff @(posedge clk or negedge rst_n) begin
+  always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       state      <= S_IDLE;
       valid      <= 1'b0;
@@ -170,9 +169,9 @@ module transformer_decoder_stream
       attn_start <= 1'b0;
       ln2_start  <= 1'b0;
       ffn_start  <= 1'b0;
-      for (int i = 0; i < D_MODEL; i++) begin
-        residual1[i] <= '0;
-        out_emb[i]   <= '0;
+      for (i = 0; i < D_MODEL; i = i + 1) begin
+        residual1[i] <= 0;
+        out_emb[i]   <= 0;
       end
     end else begin
       state      <= state_next;
@@ -187,14 +186,14 @@ module transformer_decoder_stream
         S_LN1_WAIT:    ;
         S_ATTN_START:  attn_start <= 1'b1;
         S_ATTN_WAIT:   ;
-        S_RESIDUAL1:   for (int i = 0; i < D_MODEL; i++)
+        S_RESIDUAL1:   for (i = 0; i < D_MODEL; i = i + 1)
                          residual1[i] <= fp_sat_add(token_emb[i], attn_out[i]);
         S_LN2_START:   ln2_start <= 1'b1;
         S_LN2_WAIT:    ;
         S_FFN_START:   ffn_start <= 1'b1;
         S_FFN_WAIT:    ;
         S_RESIDUAL2: begin
-          for (int i = 0; i < D_MODEL; i++)
+          for (i = 0; i < D_MODEL; i = i + 1)
             out_emb[i] <= fp_sat_add(residual1[i], ffn_out[i]);
           valid <= 1'b1;
         end
@@ -204,7 +203,7 @@ module transformer_decoder_stream
     end
   end
 
-  always_comb begin
+  always @(*) begin
     state_next = state;
     case (state)
       S_IDLE:       if (start) state_next = S_LN1_START;

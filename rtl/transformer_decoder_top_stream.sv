@@ -43,15 +43,15 @@ module transformer_decoder_top_stream
   // --- Weight-loading bus ---
   input  logic     wl_en,
   input  logic [15:0] wl_addr,
-  input  data_t    wl_data,
+  input  signed [15:0]    wl_data,
 
   // --- Inference ---
   input  logic     start,
   input  logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] token_emb,
-  input  seq_idx_t seq_pos,
+  input  [6:0] seq_pos,
 
-  output logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] out_emb,
-  output logic     valid
+  output reg signed [D_MODEL-1:0][DATA_WIDTH-1:0] out_emb,
+  output reg     valid
 );
 
   // =========================================================================
@@ -76,7 +76,7 @@ module transformer_decoder_top_stream
   logic we_wq, we_wk, we_wv, we_wo, we_w1, we_w2;
   logic we_ln1g, we_ln1b, we_ln2g, we_ln2b, we_b1, we_b2;
 
-  always_comb begin
+  always @(*) begin
     we_wq   = wl_en && (wl_addr >= BASE_WQ)   && (wl_addr < BASE_WK);
     we_wk   = wl_en && (wl_addr >= BASE_WK)   && (wl_addr < BASE_WV);
     we_wv   = wl_en && (wl_addr >= BASE_WV)   && (wl_addr < BASE_WO);
@@ -100,7 +100,7 @@ module transformer_decoder_top_stream
   logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] ln2_beta;
   logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] b2_arr;
 
-  always_ff @(posedge clk) begin
+  always @(posedge clk) begin
     if (we_ln1g) ln1_gamma[wl_addr[$clog2(D_MODEL)-1:0]] <= wl_data;
     if (we_ln1b) ln1_beta [wl_addr[$clog2(D_MODEL)-1:0]] <= wl_data;
     if (we_ln2g) ln2_gamma[wl_addr[$clog2(D_MODEL)-1:0]] <= wl_data;
@@ -113,31 +113,31 @@ module transformer_decoder_top_stream
   // =========================================================================
   logic [$clog2(D_MODEL*D_MODEL)-1:0] wqkv_rd_addr;
   logic                                wqkv_rd_en;
-  data_t wq_rd_data, wk_rd_data, wv_rd_data;
+  reg signed [15:0] wq_rd_data, wk_rd_data, wv_rd_data;
 
   logic [$clog2(D_MODEL*D_MODEL)-1:0] wo_rd_addr;
   logic                                wo_rd_en;
-  data_t wo_rd_data;
+  reg signed [15:0] wo_rd_data;
 
   logic [$clog2(D_MODEL*D_FF)-1:0]    w1_rd_addr;
   logic                                w1_rd_en;
-  data_t w1_rd_data;
+  reg signed [15:0] w1_rd_data;
 
   logic [$clog2(D_FF)-1:0]            b1_rd_addr;
   logic                                b1_rd_en;
-  data_t b1_rd_data;
+  reg signed [15:0] b1_rd_data;
 
   logic [$clog2(D_FF*D_MODEL)-1:0]    w2_rd_addr;
   logic                                w2_rd_en;
-  data_t w2_rd_data;
+  reg signed [15:0] w2_rd_data;
 
   // KV-cache signals
   logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] k_cache_wr_vec;
   logic signed [D_MODEL-1:0][DATA_WIDTH-1:0] v_cache_wr_vec;
   logic cache_wr_en;
-  seq_idx_t kcache_rd_pos, vcache_rd_pos;
+  reg [6:0] kcache_rd_pos, vcache_rd_pos;
   logic [$clog2(D_MODEL)-1:0] kcache_rd_dim, vcache_rd_dim;
-  data_t kcache_rd_data, vcache_rd_data;
+  reg signed [15:0] kcache_rd_data, vcache_rd_data;
 
   // =========================================================================
   // Weight BRAMs — read port muxed between weight-load and compute

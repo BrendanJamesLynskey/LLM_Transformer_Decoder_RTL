@@ -41,42 +41,50 @@ module softmax_unit
   input  logic                              start,
   input  logic signed [VEC_LEN-1:0][DATA_WIDTH-1:0] scores,
 
-  output logic signed [VEC_LEN-1:0][DATA_WIDTH-1:0] probs,
-  output logic                              valid
+  output reg signed [VEC_LEN-1:0][DATA_WIDTH-1:0] probs,
+  output reg                              valid
 );
 
+
+  integer i;
+  // Local copies of to_data/to_acc (iverilog 10.1 can't resolve
+  // package functions from within module-local functions)
+  function automatic signed [31:0] to_acc(input signed [15:0] val);
+    to_acc = {{16{val[15]}}, val};
+  endfunction
+  function automatic signed [15:0] to_data(input signed [31:0] val);
+    to_data = val[15:0];
+  endfunction
   // =========================================================================
   // State Machine
   // =========================================================================
-  typedef enum logic [2:0] {
-    S_IDLE,
-    S_FIND_MAX,
-    S_SUBTRACT_EXP,
-    S_SUM,
-    S_RECIP,        // Compute reciprocal of exp_sum (1 cycle)
-    S_NORMALIZE,    // Multiply each exp by reciprocal
-    S_DONE
-  } state_t;
+  localparam [2:0] S_IDLE = 0;
+  localparam [2:0] S_FIND_MAX = 1;
+  localparam [2:0] S_SUBTRACT_EXP = 2;
+  localparam [2:0] S_SUM = 3;
+  localparam [2:0] S_RECIP = 4;
+  localparam [2:0] S_NORMALIZE = 5;
+  localparam [2:0] S_DONE = 6;
 
-  state_t state, state_next;
+  reg [2:0] state, state_next;
 
   // Internal registers
-  data_t max_val;
-  data_t shifted  [VEC_LEN];
-  data_t exp_vals [VEC_LEN];
-  acc_t  exp_sum;
+  reg signed [15:0] max_val;
+  reg signed [15:0] shifted  [VEC_LEN];
+  reg signed [15:0] exp_vals [VEC_LEN];
+  reg signed [31:0]  exp_sum;
   logic [$clog2(VEC_LEN):0] idx;
 
   // Reciprocal of exp_sum (computed in S_RECIP, used in S_NORMALIZE)
-  data_t recip_val;
+  reg signed [15:0] recip_val;
 
   // =========================================================================
   // Piecewise-Linear Exponential Approximation (for negative inputs)
   // =========================================================================
   // exp(x) for x in [-8, 0] mapped to Q8.8
   // Segments: [-8,-4]: ~0, [-4,-2]: steep ramp, [-2,-1]: moderate, [-1,0]: ~1
-  function automatic data_t approx_exp(input data_t x);
-    data_t result;
+  function automatic signed [15:0] approx_exp(input signed [15:0] x);
+    reg signed [15:0] result;
     if (x >= 0)
       return 16'sh0100;           // exp(0) = 1.0
     else if (x > -16'sh0100)      // x in (-1, 0)
@@ -138,8 +146,9 @@ module softmax_unit
   // Count Leading Zeros (16-bit)
   // =========================================================================
   function automatic logic [3:0] clz16(input logic [15:0] val);
-    for (int i = 15; i >= 0; i--) begin
-      if (val[i]) return 4'(15 - i);
+    integer i;
+    for (i = 15; i >= 0; i--) begin
+      if (val[i]) return (15 - i);
     end
     return 4'd15;
   endfunction
@@ -159,7 +168,7 @@ module softmax_unit
   // as the second operand of fp_mul (which interprets it as Q8.8):
   //   fp_mul(e, r) = (e * r) >> 8 = e * (65536/S) >> 8 = (e << 8) / S
   // which is exactly the original division formula.
-  function automatic data_t compute_reciprocal(input logic [15:0] s);
+  function automatic signed [15:0] compute_reciprocal(input logic [15:0] s);
     logic [3:0]  lz;
     logic [15:0] s_norm;
     logic [4:0]  lut_idx;
@@ -211,24 +220,24 @@ module softmax_unit
     if (result > 16'h7FFF)
       return 16'sh7FFF;
     else
-      return data_t'(result);
+      return to_data(result);
   endfunction
 
   // =========================================================================
   // FSM Sequential Logic
   // =========================================================================
-  always_ff @(posedge clk or negedge rst_n) begin
+  always @(posedge clk or negedge rst_n) begin
     if (!rst_n) begin
       state     <= S_IDLE;
-      max_val   <= '0;
-      exp_sum   <= '0;
-      idx       <= '0;
+      max_val   <= 0;
+      exp_sum   <= 0;
+      idx       <= 0;
       valid     <= 1'b0;
-      recip_val <= '0;
-      for (int i = 0; i < VEC_LEN; i++) begin
-        shifted[i]  <= '0;
-        exp_vals[i] <= '0;
-        probs[i]    <= '0;
+      recip_val <= 0;
+      for (i = 0; i < VEC_LEN; i = i + 1) begin
+        shifted[i]  <= 0;
+        exp_vals[i] <= 0;
+        probs[i]    <= 0;
       end
     end else begin
       state <= state_next;
@@ -243,48 +252,48 @@ module softmax_unit
         end
 
         S_FIND_MAX: begin
-          if (idx < VEC_LEN[$clog2(VEC_LEN):0]) begin
+          if (idx < VEC_LEN) begin
             if (scores[idx] > max_val)
               max_val <= scores[idx];
             idx <= idx + 1;
           end else begin
-            idx <= '0;
+            idx <= 0;
           end
         end
 
         S_SUBTRACT_EXP: begin
-          if (idx < VEC_LEN[$clog2(VEC_LEN):0]) begin
+          if (idx < VEC_LEN) begin
             shifted[idx]  <= scores[idx] - max_val;
             exp_vals[idx] <= approx_exp(scores[idx] - max_val);
             idx <= idx + 1;
           end else begin
-            idx     <= '0;
-            exp_sum <= '0;
+            idx     <= 0;
+            exp_sum <= 0;
           end
         end
 
         S_SUM: begin
-          if (idx < VEC_LEN[$clog2(VEC_LEN):0]) begin
-            exp_sum <= exp_sum + acc_t'(exp_vals[idx]);
+          if (idx < VEC_LEN) begin
+            exp_sum <= exp_sum + to_acc(exp_vals[idx]);
             idx <= idx + 1;
           end else begin
-            idx <= '0;
+            idx <= 0;
           end
         end
 
         // Compute reciprocal once (replaces per-element division)
         S_RECIP: begin
           recip_val <= compute_reciprocal(exp_sum[15:0]);
-          idx       <= '0;
+          idx       <= 0;
         end
 
         // Normalise: probs[i] = fp_mul(exp_vals[i], recip_val)
         S_NORMALIZE: begin
-          if (idx < VEC_LEN[$clog2(VEC_LEN):0]) begin
+          if (idx < VEC_LEN) begin
             if (exp_sum != 0)
               probs[idx] <= fp_mul(exp_vals[idx], recip_val);
             else
-              probs[idx] <= '0;
+              probs[idx] <= 0;
             idx <= idx + 1;
           end else begin
             valid <= 1'b1;
@@ -303,15 +312,15 @@ module softmax_unit
   // =========================================================================
   // FSM Next-State Logic
   // =========================================================================
-  always_comb begin
+  always @(*) begin
     state_next = state;
     case (state)
       S_IDLE:         if (start) state_next = S_FIND_MAX;
-      S_FIND_MAX:     if (idx >= VEC_LEN[$clog2(VEC_LEN):0]) state_next = S_SUBTRACT_EXP;
-      S_SUBTRACT_EXP: if (idx >= VEC_LEN[$clog2(VEC_LEN):0]) state_next = S_SUM;
-      S_SUM:          if (idx >= VEC_LEN[$clog2(VEC_LEN):0]) state_next = S_RECIP;
+      S_FIND_MAX:     if (idx >= VEC_LEN) state_next = S_SUBTRACT_EXP;
+      S_SUBTRACT_EXP: if (idx >= VEC_LEN) state_next = S_SUM;
+      S_SUM:          if (idx >= VEC_LEN) state_next = S_RECIP;
       S_RECIP:        state_next = S_NORMALIZE;
-      S_NORMALIZE:    if (idx >= VEC_LEN[$clog2(VEC_LEN):0]) state_next = S_DONE;
+      S_NORMALIZE:    if (idx >= VEC_LEN) state_next = S_DONE;
       S_DONE:         state_next = S_IDLE;
       default:        state_next = S_IDLE;
     endcase

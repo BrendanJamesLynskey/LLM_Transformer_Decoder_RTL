@@ -27,12 +27,29 @@ def int_to_fp(val):
     return val / (1 << FRAC_BITS)
 
 
+def pack_scores(scores_float):
+    """Pack a list of floats into a single integer for packed array port."""
+    val = 0
+    for i in range(VEC_LEN):
+        word = fp_to_int(scores_float[i])
+        val |= (word & 0xFFFF) << (i * 16)
+    return val
+
+
+def unpack_probs(packed_val):
+    """Unpack a packed array integer into a list of floats."""
+    probs = []
+    for i in range(VEC_LEN):
+        raw = (packed_val >> (i * 16)) & 0xFFFF
+        probs.append(int_to_fp(raw))
+    return probs
+
+
 async def reset_dut(dut):
     """Apply reset."""
     dut.rst_n.value = 0
     dut.start.value = 0
-    for i in range(VEC_LEN):
-        dut.scores[i].value = 0
+    dut.scores.value = 0
     for _ in range(5):
         await RisingEdge(dut.clk)
     dut.rst_n.value = 1
@@ -41,9 +58,8 @@ async def reset_dut(dut):
 
 async def run_softmax(dut, scores_float):
     """Run softmax and return probabilities as floats."""
-    # Set input scores
-    for i in range(VEC_LEN):
-        dut.scores[i].value = fp_to_int(scores_float[i])
+    # Set input scores as packed value
+    dut.scores.value = pack_scores(scores_float)
     await RisingEdge(dut.clk)
 
     # Start
@@ -59,11 +75,9 @@ async def run_softmax(dut, scores_float):
     else:
         raise TimeoutError(f"Softmax did not complete within {TIMEOUT_CYCLES} cycles")
 
-    # Read output probabilities
-    probs = []
-    for i in range(VEC_LEN):
-        raw = int(dut.probs[i].value) & 0xFFFF
-        probs.append(int_to_fp(raw))
+    # Read output probabilities from packed array
+    packed = int(dut.probs.value)
+    probs = unpack_probs(packed)
 
     # Wait for FSM to return to idle
     for _ in range(5):

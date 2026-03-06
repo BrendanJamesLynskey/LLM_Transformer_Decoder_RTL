@@ -36,13 +36,13 @@ module bram_dp
   input  logic                       a_we,
   input  logic [$clog2(DEPTH)-1:0]   a_addr,
   input  logic [DATA_WIDTH-1:0]      a_wdata,
-  output logic [DATA_WIDTH-1:0]      a_rdata,
+  output reg [DATA_WIDTH-1:0]      a_rdata,
 
   // Port B (typically read port for cached values)
   input  logic                       b_we,
   input  logic [$clog2(DEPTH)-1:0]   b_addr,
   input  logic [DATA_WIDTH-1:0]      b_wdata,
-  output logic [DATA_WIDTH-1:0]      b_rdata
+  output reg [DATA_WIDTH-1:0]      b_rdata
 );
 
   // Memory array
@@ -56,14 +56,14 @@ module bram_dp
   end
 
   // Port A: synchronous read/write (read-first)
-  always_ff @(posedge clk) begin
+  always @(posedge clk) begin
     a_rdata <= mem[a_addr];
     if (a_we)
       mem[a_addr] <= a_wdata;
   end
 
   // Port B: synchronous read/write (read-first)
-  always_ff @(posedge clk) begin
+  always @(posedge clk) begin
     b_rdata <= mem[b_addr];
     if (b_we)
       mem[b_addr] <= b_wdata;

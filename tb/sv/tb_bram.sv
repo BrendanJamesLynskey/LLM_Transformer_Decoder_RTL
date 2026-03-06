@@ -24,6 +24,8 @@ module tb_bram;
     .clk(clk), .we(sp_we), .addr(sp_addr), .wdata(sp_wdata), .rdata(sp_rdata)
   );
 
+  integer i;
+  integer ok;
   // =========================================================================
   // Dual-port BRAM (no init)
   // =========================================================================
@@ -48,7 +50,7 @@ module tb_bram;
     sp_we = 0;
   endtask
 
-  task automatic sp_read(input logic [3:0] a, output logic [15:0] d);
+  task automatic sp_read(input logic [3:0] a, output reg [15:0] d);
     @(negedge clk);
     sp_addr = a; sp_we = 0;
     @(posedge clk);  // BRAM registers addr on this edge
@@ -71,8 +73,8 @@ module tb_bram;
   endtask
 
   task automatic dp_read_both(
-    input logic [3:0] aa, output logic [15:0] ad,
-    input logic [3:0] ba, output logic [15:0] bd
+    input logic [3:0] aa, output reg [15:0] ad,
+    input logic [3:0] ba, output reg [15:0] bd
   );
     @(negedge clk);
     dp_a_we = 0; dp_a_addr = aa;
@@ -116,12 +118,12 @@ module tb_bram;
     // Test 2: SP sequential write then readback (8 values)
     // ================================================================
     $display("\n--- Test 2: SP sequential write/read ---");
-    for (int i = 0; i < 8; i++)
+    for (i = 0; i < 8; i = i + 1)
       sp_write(i[3:0], 16'hA000 + i[15:0]);
 
     begin
-      int ok = 1;
-      for (int i = 0; i < 8; i++) begin
+      ok = 1;
+      for (i = 0; i < 8; i = i + 1) begin
         sp_read(i[3:0], rd_val);
         if (rd_val !== (16'hA000 + i[15:0])) begin
           $display("  [FAIL] addr=%0d expected %h got %h", i, 16'hA000+i[15:0], rd_val);
@@ -139,7 +141,7 @@ module tb_bram;
     // Test 3: SP init via direct mem load ($readmemh simulation)
     // ================================================================
     $display("\n--- Test 3: SP hex init (simulated) ---");
-    for (int i = 0; i < 16; i++)
+    for (i = 0; i < 16; i = i + 1)
       u_sp.mem[i] = 16'h0100 + i[15:0];
 
     sp_read(4'd0, rd_val);
@@ -200,7 +202,7 @@ module tb_bram;
     // Test 6: DP init via direct mem load
     // ================================================================
     $display("\n--- Test 6: DP hex init (simulated) ---");
-    for (int i = 0; i < 16; i++)
+    for (i = 0; i < 16; i = i + 1)
       u_dp.mem[i] = 16'hF000 + i[15:0];
 
     dp_read_both(4'd0, rd_a, 4'd15, rd_b);

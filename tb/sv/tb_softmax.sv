@@ -61,13 +61,15 @@ module tb_softmax;
     for (i = 0; i < VEC_LEN; i = i + 1)
       $display("    probs[%0d] = %h (%.4f)", i, probs[i], $itor(probs[i]) / 256.0);
 
-    // All should be roughly equal (~1/8 = 0.125 = 0x0020)
+    // All outputs should be equal (~1/8 = 0.125 = 0x0020 in Q8.8).
+    // The PWL exp approximation is exact at x=0 (returns 0x0100), so
+    // after max-subtract all inputs are 0 and all exp values are identical.
     if (probs[0] > 0 && probs[0] == probs[1]) begin
       $display("[PASS] Uniform inputs → equal outputs");
       pass_count++;
     end else begin
-      $display("[INFO] Uniform check (approximate): probs[0]=%h probs[1]=%h", probs[0], probs[1]);
-      pass_count++; // Accept approximate equality
+      $display("[FAIL] Uniform check: probs[0]=%h probs[1]=%h (expected equal)", probs[0], probs[1]);
+      fail_count++;
     end
 
     // ---- Test 2: One dominant score ----
@@ -132,13 +134,15 @@ module tb_softmax;
     begin
       s = sum_probs();
       $display("  Sum of probabilities = %h (ideal: 0100)", s);
-      // Allow ±20% tolerance for fixed-point approximation
+      // Allow ±20% tolerance for the PWL exp approximation.
+      // With 8 uniform inputs the ideal sum is 8*(1/8)=1.0 = 0x0100.
+      // Tolerance window [0xC0, 0x140] = [0.75, 1.25].
       if (s > 16'sh00C0 && s < 16'sh0140) begin
         $display("[PASS] Sum approximately 1.0");
         pass_count++;
       end else begin
-        $display("[INFO] Sum = %h (approximate is OK)", s);
-        pass_count++; // PWL approximation may not sum perfectly
+        $display("[FAIL] Sum = %h out of range [C0,140] (expected ~0100)", s);
+        fail_count++;
       end
     end
 

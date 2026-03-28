@@ -45,6 +45,8 @@ module tb_transformer_decoder_stream;
   integer fail_count;
   integer timeout_cycles;
   integer any_nonzero;
+  reg signed [DATA_WIDTH-1:0] out_emb_tok0 [LCL_D_MODEL];
+  integer differ;
 
   // Clock: 100 MHz
   initial clk = 0;
@@ -258,12 +260,17 @@ module tb_transformer_decoder_stream;
         $display("[FAIL] Output is all zeros");
         fail_count = fail_count + 1;
       end
+
+      // Save token-0 output for KV-cache check
+      for (i = 0; i < LCL_D_MODEL; i = i + 1)
+        out_emb_tok0[i] = out_emb[i];
     end
 
-    // ---- Test 2: Sequential inference (position 1) ----
-    $display("\n--- Test 2: Sequential token at position 1 ---");
+    // ---- Test 2: KV Cache functional check (token at position 1) ----
+    // Token-1 attends over two positions (pos 0 in cache + pos 1 current),
+    // so its output must differ from token-0's single-position output.
+    $display("\n--- Test 2: KV Cache functional check (token at position 1) ---");
 
-    // New token
     for (i = 0; i < LCL_D_MODEL; i = i + 1)
       token_emb[i] = (i % 3 == 0) ? 16'sh0100 : 16'sh0000;
 
@@ -296,6 +303,18 @@ module tb_transformer_decoder_stream;
       for (i = 0; i < 8; i = i + 1)
         $display("    out_emb[%0d] = %h (%.4f)", i, out_emb[i],
                  $itor($signed(out_emb[i])) / 256.0);
+
+      // KV cache check: token-1 output must differ from token-0 output
+      differ = 0;
+      for (i = 0; i < LCL_D_MODEL; i = i + 1)
+        if (out_emb[i] !== out_emb_tok0[i]) differ = 1;
+      if (differ) begin
+        $display("[PASS] KV cache active: token-1 output differs from token-0");
+        pass_count = pass_count + 1;
+      end else begin
+        $display("[FAIL] KV cache check: token-1 output identical to token-0 (cache inactive?)");
+        fail_count = fail_count + 1;
+      end
     end
 
     // Summary

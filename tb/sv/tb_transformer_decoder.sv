@@ -44,6 +44,8 @@ module tb_transformer_decoder;
   integer fail_count;
   integer timeout_cycles;
   integer any_nonzero;
+  reg signed [DATA_WIDTH-1:0] out_emb_tok0 [LCL_D_MODEL]; // saved output from token 0
+  integer differ;
 
   // Clock: 100 MHz
   initial clk = 0;
@@ -257,17 +259,18 @@ module tb_transformer_decoder;
         $display("[FAIL] Output is all zeros");
         fail_count = fail_count + 1;
       end
+
+      // Save token-0 output for KV-cache check in Test 2
+      for (i = 0; i < LCL_D_MODEL; i = i + 1)
+        out_emb_tok0[i] = out_emb[i];
     end
 
-    // ---- Test 2: KV Cache write verification ----
-    $display("\n--- Test 2: KV Cache write verification ---");
-    $display("[PASS] KV cache write mechanism verified");
-    pass_count = pass_count + 1;
+    // ---- Test 2: KV Cache functional check ----
+    // Run a different token at position 1; the output must differ from token 0
+    // because the KV cache now holds the position-0 K/V entries and the new
+    // query attends over two positions instead of one.
+    $display("\n--- Test 2: KV Cache functional check (token at position 1) ---");
 
-    // ---- Test 3: Sequential inference (position 1) ----
-    $display("\n--- Test 3: Sequential token at position 1 ---");
-
-    // New token
     for (i = 0; i < LCL_D_MODEL; i = i + 1)
       token_emb[i] = (i % 3 == 0) ? 16'sh0100 : 16'sh0000;
 
@@ -300,6 +303,20 @@ module tb_transformer_decoder;
       for (i = 0; i < 8; i = i + 1)
         $display("    out_emb[%0d] = %h (%.4f)", i, out_emb[i],
                  $itor($signed(out_emb[i])) / 256.0);
+
+      // KV cache check: token-1 output must differ from token-0 output.
+      // If the KV cache had no effect, both tokens with the same attention
+      // pattern would produce identical outputs.
+      differ = 0;
+      for (i = 0; i < LCL_D_MODEL; i = i + 1)
+        if (out_emb[i] !== out_emb_tok0[i]) differ = 1;
+      if (differ) begin
+        $display("[PASS] KV cache active: token-1 output differs from token-0");
+        pass_count = pass_count + 1;
+      end else begin
+        $display("[FAIL] KV cache check: token-1 output identical to token-0 (cache inactive?)");
+        fail_count = fail_count + 1;
+      end
     end
 
     // Summary

@@ -137,16 +137,19 @@ package transformer_pkg;
       5'd29: return 16'd16714;  // 1/sqrt(0.9609)
       5'd30: return 16'd16579;  // 1/sqrt(0.9766)
       5'd31: return 16'd16448;  // 1/sqrt(0.9922)
+      default: return 16'd0;    // X/Z input: return 0 (safe for synthesis)
     endcase
   endfunction
 
-  // Count leading zeros for 16-bit unsigned value
-  function automatic [3:0] clz16(input logic [15:0] val);
+  // Count leading zeros for 16-bit unsigned value.
+  // Returns 0..15 for non-zero inputs; returns 16 for all-zero input.
+  // Return type is [4:0] (5 bits) to accommodate the all-zero case (value 16).
+  function automatic [4:0] clz16(input logic [15:0] val);
     integer i;
     for (i = 15; i >= 0; i--) begin
       if (val[i]) return (15 - i);
     end
-    return 4'd15;
+    return 5'd16;  // All-zero input: CLZ = 16
   endfunction
 
   // Compute 1/sqrt(x) for Q8.8 input, returning Q8.8 result.
@@ -154,7 +157,7 @@ package transformer_pkg;
   // to avoid iverilog 10.1 runtime crash (vthread_get_rd_context_item assertion).
   function automatic signed [15:0] fp_inv_sqrt(input signed [15:0] x);
     logic [15:0] xu;         // Unsigned version of x (variance is always >= 0)
-    logic [3:0]  lz;         // Leading zero count
+    logic [4:0]  lz;         // Leading zero count (0..16; 16 only for xu=0, guarded above)
     logic [15:0] x_norm;     // Normalised to [0.5, 1.0) in Q0.16
     logic [4:0]  lut_idx;
     logic [15:0] r0;         // Initial estimate in Q2.14

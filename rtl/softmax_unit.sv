@@ -139,18 +139,21 @@ module softmax_unit
       5'd29: return 16'd17190; // 1/0.9531 = 1.0492
       5'd30: return 16'd16913; // 1/0.9688 = 1.0323
       5'd31: return 16'd16644; // 1/0.9844 = 1.0159
+      default: return 16'd0;   // X/Z input: return 0 (safe for synthesis)
     endcase
   endfunction
 
   // =========================================================================
   // Count Leading Zeros (16-bit)
   // =========================================================================
-  function automatic logic [3:0] clz16(input logic [15:0] val);
+  // Returns 0..15 for non-zero inputs; returns 16 for all-zero input.
+  // Return type is [4:0] (5 bits) to accommodate the all-zero case (value 16).
+  function automatic logic [4:0] clz16(input logic [15:0] val);
     integer i;
     for (i = 15; i >= 0; i--) begin
       if (val[i]) return (15 - i);
     end
-    return 4'd15;
+    return 5'd16;  // All-zero input: CLZ = 16
   endfunction
 
   // =========================================================================
@@ -169,7 +172,7 @@ module softmax_unit
   //   fp_mul(e, r) = (e * r) >> 8 = e * (65536/S) >> 8 = (e << 8) / S
   // which is exactly the original division formula.
   function automatic signed [15:0] compute_reciprocal(input logic [15:0] s);
-    logic [3:0]  lz;
+    logic [4:0]  lz;           // 5 bits: clz16 now returns [4:0]
     logic [15:0] s_norm;
     logic [4:0]  lut_idx;
     logic [15:0] r0;
@@ -178,7 +181,7 @@ module softmax_unit
     logic [15:0] correction;
     logic [31:0] r1_wide;
     logic [15:0] r1;
-    logic [3:0]  rshift;
+    logic [4:0]  rshift;       // 5 bits to match lz width
     logic [15:0] result;
 
     if (s <= 16'd1) return 16'sh7FFF;  // Clamp: 1/0 or 1/1 -> max positive
@@ -205,11 +208,10 @@ module softmax_unit
     //   r1 ≈ 2^30 / s_norm (as integer). We want 65536/s = 2^16/s.
     //   Since s = s_norm >> lz: 2^16/s = 2^(16+lz)/s_norm = r1 * 2^(lz-14)
     //   So: result = r1 >> (14 - lz)
-    rshift = 4'd14 - lz;
-    // lz ranges 0..14 for valid 16-bit inputs, so rshift is 0..14
-    // For very small sums (large lz), rshift could be negative (left shift),
-    // but those cases will saturate anyway.
-    if (lz > 4'd14) begin
+    rshift = 5'd14 - lz;
+    // lz ranges 0..15 for valid 16-bit inputs (16 only if s==0, caught above).
+    // For very small sums (large lz), rshift could underflow; guard below.
+    if (lz > 5'd14) begin
       // exp_sum < 2: result would overflow Q8.8, clamp
       result = 16'sh7FFF;
     end else begin

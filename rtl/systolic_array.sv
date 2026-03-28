@@ -10,6 +10,10 @@
 // Operation: Streams A rows from the left and B columns from the top.
 // After PE_COLS + PE_ROWS - 1 cycles of streaming, results are available
 // in the accumulator outputs.
+// Completion: done asserts on the clock edge where the last PE (ROWS-1, COLS-1)
+// registers its result, i.e. after exactly ROWS+COLS-1 rising edges of enable.
+// The counter check uses the pre-increment value, so the comparison threshold
+// is ROWS+COLS-2 (the counter holds ROWS+COLS-2 on the cycle when done is set).
 // =============================================================================
 
 module systolic_array
@@ -79,7 +83,7 @@ module systolic_array
       done      <= 1'b0;
     end else if (enable && !done) begin
       cycle_cnt <= cycle_cnt + 1;
-      if (cycle_cnt == (ROWS + COLS - 1))
+      if (cycle_cnt == (ROWS + COLS - 2))  // Pre-increment value; done asserts after ROWS+COLS-1 edges
         done <= 1'b1;
     end
   end

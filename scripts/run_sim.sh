@@ -17,8 +17,23 @@ mkdir -p "$SIM_DIR"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
+YELLOW='\033[0;33m'
 CYAN='\033[0;36m'
 NC='\033[0m'
+
+# Check a simulation log file for [FAIL] lines and exit non-zero if any found.
+check_log() {
+    local log="$1"
+    local fails
+    fails=$(grep -c '\[FAIL\]' "$log" 2>/dev/null || true)
+    if [ "$fails" -gt 0 ]; then
+        echo -e "${RED}  ✗ $fails FAILED assertion(s) detected in $(basename "$log")${NC}"
+        grep '\[FAIL\]' "$log"
+        GLOBAL_FAIL=1
+    fi
+}
+
+GLOBAL_FAIL=0
 
 # Common RTL files
 RTL_PKG="$RTL_DIR/transformer_pkg.sv"
@@ -30,6 +45,7 @@ run_pe() {
         "$RTL_DIR/processing_element.sv" \
         "$TB_DIR/tb_processing_element.sv"
     vvp "$SIM_DIR/pe_tb" | tee "$SIM_DIR/pe_results.log"
+    check_log "$SIM_DIR/pe_results.log"
     echo ""
 }
 
@@ -41,6 +57,7 @@ run_systolic() {
         "$RTL_DIR/systolic_array.sv" \
         "$TB_DIR/tb_systolic_array.sv"
     vvp "$SIM_DIR/systolic_tb" | tee "$SIM_DIR/systolic_results.log"
+    check_log "$SIM_DIR/systolic_results.log"
     echo ""
 }
 
@@ -51,6 +68,7 @@ run_softmax() {
         "$RTL_DIR/softmax_unit.sv" \
         "$TB_DIR/tb_softmax.sv"
     vvp "$SIM_DIR/softmax_tb" | tee "$SIM_DIR/softmax_results.log"
+    check_log "$SIM_DIR/softmax_results.log"
     echo ""
 }
 
@@ -71,6 +89,7 @@ run_decoder() {
         "$RTL_DIR/transformer_decoder_top.sv" \
         "$TB_DIR/tb_transformer_decoder.sv"
     vvp "$SIM_DIR/decoder_tb" | tee "$SIM_DIR/decoder_results.log"
+    check_log "$SIM_DIR/decoder_results.log"
     echo ""
 }
 
@@ -83,6 +102,7 @@ run_bram() {
         "$RTL_DIR/kv_cache_bram.sv" \
         "$TB_DIR/tb_bram.sv"
     vvp "$SIM_DIR/bram_tb" | tee "$SIM_DIR/bram_results.log"
+    check_log "$SIM_DIR/bram_results.log"
     echo ""
 }
 
@@ -103,6 +123,7 @@ run_stream() {
         "$RTL_DIR/transformer_decoder_top_stream.sv" \
         "$TB_DIR/tb_transformer_decoder_stream.sv"
     vvp "$SIM_DIR/stream_tb" | tee "$SIM_DIR/stream_results.log"
+    check_log "$SIM_DIR/stream_results.log"
     echo ""
 }
 
@@ -120,6 +141,10 @@ case "${1:-all}" in
         run_decoder
         run_bram
         run_stream
+        if [ "$GLOBAL_FAIL" -ne 0 ]; then
+            echo -e "${RED}========== FAILURES DETECTED — see [FAIL] lines above ==========${NC}"
+            exit 1
+        fi
         echo -e "${GREEN}========== All Tests Complete ==========${NC}"
         ;;
     *)

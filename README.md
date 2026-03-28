@@ -188,7 +188,7 @@ The systolic architecture maximises data reuse: each operand traverses N PEs, yi
 
 ### Pre-Norm
 
-LayerNorm before each sub-layer (rather than after) improves training stability and matches the architecture used by GPT-2, LLaMA, and most modern decoder-only LLMs. At inference, results are equivalent.
+LayerNorm before each sub-layer (rather than after) improves training stability and matches the architecture used by GPT-2, LLaMA, and most modern decoder-only LLMs. Pre-norm and post-norm produce different numerical outputs for the same weight values; pre-norm is chosen because it matches the training-time architecture of these models.
 
 ### KV-Cache
 
@@ -234,6 +234,8 @@ MIT License. See `LICENSE` for details.
 Target: Xilinx Artix-7 (xc7a35tcpg236-1) | Tool: Vivado 2025.2
 
 The full top-level was decomposed into sub-modules for synthesis due to host memory constraints (16 GB). Sub-module figures are not additive — shared logic and optimisations at the top level mean the true total would differ.
+
+**Note on Fmax:** `softmax_unit` (47.9 MHz) and `layer_norm` (29.2 MHz) do not meet the 100 MHz clock target. Both modules contain multi-cycle iterative FSMs whose critical path is the combinational logic within a single FSM state (the Newton–Raphson step in layer_norm is the tightest path). Achieving 100 MHz would require pipelining across FSM states in those two modules. The streaming decoder variant is the intended synthesis target; the non-streaming variant is a reference/simulation design.
 
 | Module | LUTs | FFs | BRAM | DSP | Fmax (MHz) |
 |--------|------|-----|------|-----|------------|

@@ -1,6 +1,6 @@
 # LLM Transformer Decoder RTL Accelerator
 
-A synthesizable **SystemVerilog** implementation of a Transformer Decoder block, optimized for LLM inference. Includes a full verification suite — behavioural Python golden model, SystemVerilog testbenches, and CocoTB testbenches — with 83 passing tests and no external Python dependencies for behavioural verification.
+A synthesizable **SystemVerilog** implementation of a Transformer Decoder block, optimized for LLM inference. Includes a full verification suite — behavioural Python golden model, SystemVerilog testbenches, and CocoTB testbenches — with 84 passing tests and no external Python dependencies for behavioural verification.
 
 ---
 
@@ -100,7 +100,7 @@ transformer_decoder          ← Top-level decoder block
 
 ## Verification
 
-The project has **83 passing tests** across three verification tiers.
+The project has **84 passing tests** across three verification tiers.
 
 ### Tier 1 — Behavioural Verification (no simulator required)
 
@@ -124,7 +124,7 @@ Runs **54 behavioural tests** with golden-model comparison:
 
 ### Tier 2 — RTL Simulation (requires iverilog)
 
-**29 RTL simulation tests** via SystemVerilog testbenches:
+**30 RTL simulation tests** via SystemVerilog testbenches:
 
 ```bash
 # Run all RTL tests

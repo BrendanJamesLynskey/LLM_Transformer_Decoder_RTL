@@ -32,6 +32,13 @@ module layer_norm
   output reg   valid
 );
 
+  // Compile-time check: mean/variance computation uses arithmetic right-shift
+  // (>>> $clog2(VEC_LEN)) which is only correct for power-of-2 lengths.
+  initial begin
+    if (VEC_LEN & (VEC_LEN - 1))
+      $fatal(1, "layer_norm: VEC_LEN=%0d is not a power of 2; right-shift division is incorrect for non-power-of-2 lengths", VEC_LEN);
+  end
+
   integer i;
   localparam [2:0] S_IDLE = 0;
   localparam [2:0] S_MEAN = 1;

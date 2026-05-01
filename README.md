@@ -2,6 +2,10 @@
 
 A synthesizable **SystemVerilog** implementation of a Transformer Decoder block, optimized for LLM inference. Includes a full verification suite — behavioural Python golden model, SystemVerilog testbenches, and CocoTB testbenches — with 84 passing tests and no external Python dependencies for behavioural verification.
 
+> **📊 Hardware deep-dive presentation:** [brendanjameslynskey.github.io/LLM_Transformer_Decoder_RTL](https://brendanjameslynskey.github.io/LLM_Transformer_Decoder_RTL/)
+>
+> A 27-slide walkthrough of every RTL module, the verification strategy, the Vivado synthesis numbers, and how this design relates to the NVIDIA Hopper Transformer Engine, Google TPU, Cerebras WSE-3, Groq LPU, Etched Sohu, and the FPGA-transformer lineage from FTRANS / EdgeBERT / FQ-BERT / ViTA. Companion to the [AI_MMUL_Unit](https://github.com/BrendanJamesLynskey/AI_MMUL_Unit) deep-dive on systolic-array MAC primitives.
+
 ---
 
 ## Architecture
@@ -93,6 +97,7 @@ transformer_decoder          ← Top-level decoder block
 ├── docs/
 │   ├── report.md                 # Technical report (Markdown)
 │   └── report.pdf                # Technical report (PDF)
+├── index.html                    # GitHub Pages deep-dive presentation
 └── README.md
 ```
 

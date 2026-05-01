@@ -1,0 +1,1462 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>LLM Transformer Decoder RTL — Hardware Deep Dive</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --bg-primary: #0a0a0a;
+            --bg-card: #0d1117;
+            --bg-code: #161b22;
+            --text-primary: #e6edf3;
+            --text-secondary: #8b949e;
+            --accent: #38bdf8;
+            --accent-dim: #38bdf822;
+            --accent-glow: #38bdf833;
+            --green: #10b981;
+            --blue: #60a5fa;
+            --purple: #a78bfa;
+            --red: #ef4444;
+            --amber: #f59e0b;
+            --border: #21262d;
+            --font-display: 'Space Grotesk', sans-serif;
+            --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
+            --font-body: 'Inter', sans-serif;
+            --max-width: 920px;
+        }
+        *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+        html { scroll-behavior: smooth; }
+        body {
+            background: var(--bg-primary); color: var(--text-primary);
+            font-family: var(--font-body); font-size: 17px; line-height: 1.7;
+            overflow-x: hidden;
+        }
+        .hero {
+            min-height: 100vh; display: flex; flex-direction: column;
+            justify-content: center; align-items: center;
+            padding: 2rem 1.5rem; text-align: center; position: relative;
+        }
+        .hero::before {
+            content: ''; position: absolute; top: 0; left: 50%;
+            transform: translateX(-50%); width: 600px; height: 600px;
+            background: radial-gradient(circle, var(--accent-glow) 0%, transparent 70%);
+            pointer-events: none; z-index: 0;
+        }
+        .hero > * { position: relative; z-index: 1; }
+        .series-label {
+            font-family: var(--font-mono); font-size: 0.85rem; color: var(--accent);
+            letter-spacing: 0.15em; text-transform: uppercase; margin-bottom: 1rem;
+        }
+        .hero h1 {
+            font-family: var(--font-display); font-size: clamp(2rem, 5vw, 3.2rem);
+            font-weight: 700; line-height: 1.2; margin-bottom: 1rem;
+        }
+        .hero h1 .accent { color: var(--accent); }
+        .hero .subtitle {
+            font-size: 1.1rem; color: var(--text-secondary);
+            max-width: 720px; margin-bottom: 2rem;
+        }
+        .tags { display: flex; flex-wrap: wrap; gap: 0.5rem; justify-content: center; margin-bottom: 2.5rem; }
+        .tag {
+            font-family: var(--font-mono); font-size: 0.75rem;
+            padding: 0.25rem 0.75rem; border-radius: 999px;
+            border: 1px solid var(--accent); color: var(--accent);
+            background: var(--accent-dim); white-space: nowrap;
+        }
+        .hero-actions { display: flex; flex-wrap: wrap; gap: 0.6rem; justify-content: center; }
+        .hero-actions a {
+            font-family: var(--font-mono); font-size: 0.85rem;
+            padding: 0.55rem 1.2rem; border-radius: 6px; text-decoration: none;
+            border: 1px solid var(--border); color: var(--text-primary);
+            background: var(--bg-card); transition: all 0.15s;
+        }
+        .hero-actions a.primary { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+        .hero-actions a:hover { transform: translateY(-1px); border-color: var(--accent); }
+
+        .slide {
+            min-height: 100vh; max-width: var(--max-width); margin: 0 auto;
+            padding: 4rem 1.5rem; position: relative;
+            display: flex; flex-direction: column; justify-content: center;
+        }
+        .slide-number {
+            font-family: var(--font-display); font-size: 5rem; font-weight: 700;
+            color: var(--accent-dim); position: absolute; top: 2rem; right: 1.5rem;
+            line-height: 1; user-select: none;
+        }
+        .slide h2 {
+            font-family: var(--font-display); font-size: 1.9rem; font-weight: 700;
+            color: var(--accent); margin-bottom: 1.5rem; line-height: 1.25;
+        }
+        .slide h3 {
+            font-family: var(--font-display); font-size: 1.3rem; font-weight: 600;
+            color: var(--text-primary); margin-top: 1.5rem; margin-bottom: 0.75rem;
+        }
+        .slide p { margin-bottom: 1rem; color: var(--text-secondary); }
+        .slide p strong { color: var(--text-primary); }
+        .slide ul, .slide ol { margin-bottom: 1rem; padding-left: 1.5rem; color: var(--text-secondary); }
+        .slide li { margin-bottom: 0.4rem; }
+        .slide li strong { color: var(--text-primary); }
+
+        .code-block {
+            background: var(--bg-code); border: 1px solid var(--border);
+            border-radius: 8px; margin: 1.25rem 0; overflow: hidden;
+        }
+        .code-header {
+            font-family: var(--font-mono); font-size: 0.75rem; color: var(--accent);
+            background: rgba(56, 189, 248, 0.08); padding: 0.4rem 1rem;
+            border-bottom: 1px solid var(--border);
+        }
+        .code-block pre { margin: 0; padding: 1rem; overflow-x: auto; }
+        .code-block code { font-family: var(--font-mono); font-size: 0.85rem; line-height: 1.6; color: #c9d1d9; }
+        .kw { color: #ff7b72; } .fn { color: #d2a8ff; } .str { color: #a5d6ff; }
+        .cm { color: #8b949e; font-style: italic; } .num { color: #79c0ff; }
+        .type { color: #ffa657; }
+
+        .table-wrap { overflow-x: auto; margin: 1.25rem 0; border-radius: 8px; border: 1px solid var(--border); }
+        table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+        th { background: var(--bg-code); color: var(--accent); font-weight: 600; text-align: left; padding: 0.6rem 0.9rem; border-bottom: 1px solid var(--border); font-family: var(--font-display); white-space: nowrap; }
+        td { padding: 0.5rem 0.9rem; border-bottom: 1px solid var(--border); color: var(--text-secondary); }
+        tr:last-child td { border-bottom: none; }
+        tr:nth-child(even) td { background: rgba(13, 17, 23, 0.5); }
+        td strong, td code { color: var(--text-primary); }
+        td code { font-family: var(--font-mono); font-size: 0.85em; background: var(--bg-code); padding: 0.05rem 0.3rem; border-radius: 3px; }
+
+        .diagram-grid { display: grid; gap: 0.75rem; margin: 1.5rem 0; padding: 1.5rem; background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; }
+        .diagram-grid.cols-2 { grid-template-columns: 1fr 1fr; }
+        .diagram-grid.cols-3 { grid-template-columns: 1fr 1fr 1fr; }
+        .diagram-panel { padding: 1rem; background: var(--bg-code); border: 1px solid var(--border); border-radius: 6px; }
+        .diagram-panel.accent-border { border-left: 3px solid var(--accent); }
+        .diagram-panel.amber-border { border-left: 3px solid var(--amber); }
+        .diagram-panel.green-border { border-left: 3px solid var(--green); }
+        .diagram-panel h4 { font-family: var(--font-display); font-size: 1rem; color: var(--accent); margin-bottom: 0.5rem; }
+        .diagram-panel.amber-border h4 { color: var(--amber); }
+        .diagram-panel.green-border h4 { color: var(--green); }
+        .diagram-panel p, .diagram-panel ul { font-size: 0.85rem; }
+        .callout { background: var(--bg-card); border-left: 3px solid var(--accent); border-radius: 0 8px 8px 0; padding: 1rem 1.25rem; margin: 1.25rem 0; }
+        .callout p { margin-bottom: 0; }
+        .callout-label { font-family: var(--font-mono); font-size: 0.75rem; color: var(--accent); text-transform: uppercase; letter-spacing: 0.1em; margin-bottom: 0.3rem; }
+
+        .canvas-wrap { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 1rem; margin: 1.25rem 0; overflow-x: auto; }
+        .canvas-wrap svg, .canvas-wrap canvas { display: block; margin: 0 auto; max-width: 100%; }
+
+        .control-panel { background: var(--bg-card); border: 1px solid var(--border); border-radius: 8px; padding: 1.25rem; margin: 1.25rem 0; }
+        .control-row { display: flex; flex-wrap: wrap; align-items: center; gap: 0.75rem; margin-bottom: 0.75rem; }
+        .control-row label { font-family: var(--font-mono); font-size: 0.8rem; color: var(--text-secondary); min-width: 200px; }
+        .control-row select, .control-row input[type="range"], .control-row input[type="number"] {
+            background: var(--bg-code); border: 1px solid var(--border);
+            color: var(--text-primary); border-radius: 4px; padding: 0.3rem 0.5rem;
+            font-family: var(--font-mono); font-size: 0.85rem;
+        }
+        .control-row input[type="range"] { flex: 1; min-width: 180px; accent-color: var(--accent); }
+        .control-row .val { font-family: var(--font-mono); font-size: 0.85rem; color: var(--accent); min-width: 90px; text-align: right; }
+        .metric-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 0.6rem; margin-top: 0.75rem; }
+        .metric { background: var(--bg-code); border: 1px solid var(--border); border-radius: 6px; padding: 0.6rem 0.8rem; text-align: center; }
+        .metric .metric-label { font-family: var(--font-mono); font-size: 0.7rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.08em; }
+        .metric .metric-value { font-family: var(--font-display); font-size: 1.25rem; color: var(--accent); font-weight: 600; margin-top: 0.2rem; }
+        .pill-row { display: flex; flex-wrap: wrap; gap: 0.4rem; margin: 0.4rem 0 0.8rem; }
+        .pill { font-family: var(--font-mono); font-size: 0.75rem; padding: 0.25rem 0.7rem; border-radius: 999px; background: var(--bg-code); border: 1px solid var(--border); color: var(--text-secondary); cursor: pointer; user-select: none; }
+        .pill.active { background: var(--accent-dim); border-color: var(--accent); color: var(--accent); }
+        .pill:hover { color: var(--text-primary); }
+
+        .footer { text-align: center; padding: 3rem 1.5rem; color: var(--text-secondary); font-size: 0.85rem; border-top: 1px solid var(--border); max-width: var(--max-width); margin: 0 auto; }
+        .footer a { color: var(--accent); text-decoration: none; }
+        .footer a:hover { text-decoration: underline; }
+
+        .contents-list { list-style: none; padding-left: 0; counter-reset: contents; }
+        .contents-list li { counter-increment: contents; padding: 0.55rem 0; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 1rem; }
+        .contents-list li:last-child { border-bottom: none; }
+        .contents-list li::before { content: counter(contents, decimal-leading-zero); font-family: var(--font-mono); font-size: 0.85rem; color: var(--accent); min-width: 2rem; }
+        .contents-list a { color: var(--text-primary); text-decoration: none; transition: color 0.2s; }
+        .contents-list a:hover { color: var(--accent); }
+
+        .ascii-art {
+            font-family: var(--font-mono); font-size: 0.8rem; line-height: 1.4;
+            color: var(--text-primary); background: var(--bg-code);
+            border: 1px solid var(--border); border-radius: 8px;
+            padding: 1rem; overflow-x: auto; white-space: pre;
+            margin: 1rem 0;
+        }
+
+        @media (max-width: 640px) {
+            .slide { padding: 3rem 1rem; min-height: auto; }
+            .slide-number { font-size: 3rem; top: 1.5rem; right: 1rem; }
+            .slide h2 { font-size: 1.5rem; }
+            .diagram-grid.cols-2, .diagram-grid.cols-3 { grid-template-columns: 1fr; }
+            .hero h1 { font-size: 1.8rem; }
+            table { font-size: 0.78rem; }
+            .ascii-art { font-size: 0.65rem; }
+        }
+    </style>
+</head>
+<body>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- HERO -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="hero">
+  <div class="series-label">Hardware · Transformer Inference</div>
+  <h1>An LLM <span class="accent">Transformer Decoder</span> in SystemVerilog</h1>
+  <p class="subtitle">A synthesisable pre-norm decoder block — Q8.8 fixed-point, 4×4 systolic MAC array, KV-cache, 84-test verification suite, Vivado synthesis to Artix-7. Walk through every module. Compare to H100, Trillium, Cerebras, Groq, and Sohu. Trace the architecture back to "Attention Is All You Need".</p>
+  <div class="tags">
+    <span class="tag">SystemVerilog</span>
+    <span class="tag">Pre-norm decoder</span>
+    <span class="tag">Q8.8 fixed-point</span>
+    <span class="tag">Systolic MAC</span>
+    <span class="tag">KV-cache</span>
+    <span class="tag">RSqrt LUT + Newton–Raphson</span>
+    <span class="tag">PWL softmax</span>
+    <span class="tag">Vivado / Artix-7</span>
+    <span class="tag">CocoTB · iverilog</span>
+  </div>
+  <div class="hero-actions">
+    <a class="primary" href="https://github.com/BrendanJamesLynskey/LLM_Transformer_Decoder_RTL">Repo →</a>
+    <a href="#s1">Contents</a>
+    <a href="https://github.com/BrendanJamesLynskey/LLM_Transformer_Decoder_RTL/blob/main/docs/report.md">Report</a>
+    <a href="https://github.com/BrendanJamesLynskey/AI_MMUL_Unit">Companion: MMUL deep-dive</a>
+  </div>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 1: Contents -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s1">
+  <div class="slide-number">01</div>
+  <h2>What this deck covers</h2>
+  <p>Twenty-six slides. Half walk through every RTL module in the repo at the level of a code review; the other half put the design in context — the algorithm, the historical hardware, and the real shipping silicon that runs the same workload on a million-times bigger budget.</p>
+  <ol class="contents-list">
+    <li><a href="#s2">Why a transformer-decoder accelerator exists</a></li>
+    <li><a href="#s3">The decoder block, end to end</a></li>
+    <li><a href="#s4">Q8.8 fixed-point — the only number format in the design</a></li>
+    <li><a href="#s5">Module: <code>transformer_pkg.sv</code> — the whole arithmetic library in one file</a></li>
+    <li><a href="#s6">Module: <code>processing_element.sv</code> — the MAC tile</a></li>
+    <li><a href="#s7">Module: <code>systolic_array.sv</code> — 4×4 array with fill / drain accounting</a></li>
+    <li><a href="#s8">Module: <code>softmax_unit.sv</code> — PWL exp + reciprocal-by-LUT FSM</a></li>
+    <li><a href="#s9">Module: <code>layer_norm.sv</code> — division-free norm via RSqrt + Newton–Raphson</a></li>
+    <li><a href="#s10">Module: <code>feed_forward.sv</code> — two GEMMs and a ReLU</a></li>
+    <li><a href="#s11">Module: <code>multi_head_attention.sv</code> — heads, masking, softmax, KV-cache</a></li>
+    <li><a href="#s12">Module: <code>transformer_decoder.sv</code> — the top-level FSM</a></li>
+    <li><a href="#s13">Streaming variant — 99.4% fewer registers</a></li>
+    <li><a href="#s14">KV-cache: <code>kv_cache_bram.sv</code> and friends</a></li>
+    <li><a href="#s15">Verification — three tiers, 84 tests</a></li>
+    <li><a href="#s16">Synthesis on Artix-7 — what's tight, what's slack</a></li>
+    <li><a href="#s17">A short history of transformer hardware</a></li>
+    <li><a href="#s18">Real systems — NVIDIA Hopper Transformer Engine</a></li>
+    <li><a href="#s19">Real systems — Blackwell, Trillium, Trainium, MI300</a></li>
+    <li><a href="#s20">Real systems — Cerebras, Groq, Tenstorrent, Etched, SambaNova, Apple ANE</a></li>
+    <li><a href="#s21">The KV-cache problem at scale — PagedAttention, NVFP4 KV</a></li>
+    <li><a href="#s22">Q8.8 vs INT8 vs FP8 vs FP4 — when fixed-point wins</a></li>
+    <li><a href="#s23">Transformer-on-FPGA — FTRANS, EdgeBERT, FQ-BERT, ViTA</a></li>
+    <li><a href="#s24">Where this design fits</a></li>
+    <li><a href="#s25">Interactive — decoder cycle counter</a></li>
+    <li><a href="#s26">Interactive — Q8.8 fixed-point explorer</a></li>
+    <li><a href="#s27">Limitations &amp; what would change at the next scale</a></li>
+  </ol>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 2: Why a transformer-decoder accelerator -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s2">
+  <div class="slide-number">02</div>
+  <h2>Why a transformer-decoder accelerator exists</h2>
+
+  <p>"Attention Is All You Need" (Vaswani et al., NeurIPS 2017, arXiv:1706.03762, posted 12 June 2017) replaced the recurrence and convolution stack with self-attention plus position-wise MLPs. It exposed a compute pattern that has dominated silicon roadmaps ever since:</p>
+
+  <ul>
+    <li><strong>≥ 99% of the FLOPs are dense GEMM</strong> (Q/K/V/O projections, FFN expand &amp; contract).</li>
+    <li><strong>~1% is non-GEMM</strong>: softmax, LayerNorm/RMSNorm, residual adds, RoPE, embedding lookups.</li>
+    <li>That 1% is on the <em>critical path of every token</em> — the GEMM cannot proceed without softmax having finished, and softmax cannot proceed without LayerNorm having finished.</li>
+  </ul>
+
+  <p>By 2020, attention had become a measurable fraction of inference time, and the academic-hardware community responded with attention-as-a-primitive papers (A³ HPCA 2020, SpAtten HPCA 2021, ELSA ISCA 2021, FACT ISCA 2023). Industry caught up in 2022 when NVIDIA shipped the Hopper <strong>Transformer Engine</strong> — the first time a GPU had per-layer FP8 statistics built in. Blackwell Ultra (2025) doubled the throughput of the SFU's <code>MUFU.EX2</code> instruction, the one softmax actually sits on — silicon admitting that softmax is finally a first-class concern.</p>
+
+  <h3>What this repo is</h3>
+  <p>This is the <strong>educational analogue</strong> of all of the above, scaled to fit in 16 GB of host memory and on a $200 Artix-7 FPGA. Every block — GEMM, softmax, LayerNorm, KV-cache, top-level FSM — is small enough to read in one screen of code. None of the moves above are skipped: the softmax is a real PWL approximation, the LayerNorm is a real division-free RSqrt path, the KV-cache really avoids re-projection of past tokens.</p>
+
+  <div class="callout">
+    <div class="callout-label">Scope</div>
+    <p>D_MODEL = 64, N_HEADS = 4, D_FF = 256, MAX_SEQ_LEN = 128, Q8.8 16-bit signed fixed-point, 4×4 PE systolic array. Vivado 2025.2 synthesises the streaming variant on Artix-7 (xc7a35tcpg236-1). The point isn't the throughput — it's that all eight RTL files together are smaller than a single CUTLASS kernel.</p>
+  </div>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 3: Decoder block end-to-end -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s3">
+  <div class="slide-number">03</div>
+  <h2>The decoder block, end to end</h2>
+  <p>One <code>transformer_decoder</code> instance corresponds to one decoder layer. Stacking N of them gives an N-layer decoder; weight memories can be shared across layers (area-optimal, time-multiplexed) or replicated (throughput-optimal). The dataflow per token is:</p>
+
+  <pre class="ascii-art">  token_emb ──► [LayerNorm 1] ──► [Multi-Head Attention] ──►(+)──► [LayerNorm 2] ──► [Feed-Forward] ──►(+)──► out_emb
+                                                              ▲ Residual 1                                ▲ Residual 2
+                  └────────────────────────────────────────────┘             └─────────────────────────────┘</pre>
+
+  <p>This is a <strong>pre-norm</strong> decoder: LayerNorm sits <em>before</em> each sub-layer, with a residual that bypasses the sub-layer. Pre-norm is the architecture used by GPT-2, GPT-3, GPT-4, LLaMA-1/2/3, Mistral, Qwen, and most modern decoder-only LLMs. The original "Attention Is All You Need" Transformer was post-norm; the switch happened around 2019 because pre-norm trains far more stably at large scale (Xiong et al., "On Layer Normalization in the Transformer Architecture", ICML 2020).</p>
+
+  <h3>Per-token sequence of operations</h3>
+  <ol>
+    <li><strong>LayerNorm 1</strong> on the input embedding — zero mean, unit variance, learnable γ/β.</li>
+    <li><strong>Multi-head attention</strong>: compute Q from current token; pull K, V for all prior positions from the KV-cache; compute scores Q·Kᵀ / √d_k; apply causal mask; softmax; weighted sum over V; concat heads; project with W<sub>O</sub>.</li>
+    <li><strong>Residual 1</strong>: token_emb + attention_out (saturating add in Q8.8).</li>
+    <li><strong>LayerNorm 2</strong> on the residual.</li>
+    <li><strong>Feed-Forward</strong>: ReLU(x·W₁ + b₁) · W₂ + b₂. The "wide-then-narrow" 4× expansion that all transformer FFNs use.</li>
+    <li><strong>Residual 2</strong>: residual1 + ffn_out.</li>
+    <li>Update KV-cache for this position; advance <code>seq_pos</code>.</li>
+  </ol>
+
+  <h3>Module hierarchy</h3>
+  <pre class="ascii-art">transformer_decoder          ← Top-level FSM (12 states)
+├── layer_norm × 2           ← Pre-attention &amp; pre-FFN normalisation
+├── multi_head_attention     ← Causal MHA with KV-cache + time-multiplexed softmax
+│   └── softmax_unit         ← Shared, MAX_SEQ_LEN-wide
+├── feed_forward             ← Two-layer FFN with ReLU
+└── transformer_pkg          ← Parameters · types · FP utilities</pre>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 4: Q8.8 fixed-point -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s4">
+  <div class="slide-number">04</div>
+  <h2>Q8.8 fixed-point — the only number format in the design</h2>
+  <p>Every value in the datapath — activations, weights, biases, partial sums, softmax outputs, normalised activations — is <strong>16-bit two's-complement Q8.8</strong>. That means 8 integer bits, 8 fractional bits, signed. Range −128.000 to +127.996, resolution 1/256 ≈ 0.0039.</p>
+
+  <div class="table-wrap"><table>
+    <tr><th>Property</th><th>Value</th></tr>
+    <tr><td>Format</td><td>Q8.8 signed (1 sign · 7 integer · 8 fraction); width 16</td></tr>
+    <tr><td>Range</td><td>[−128.0, +127.996]</td></tr>
+    <tr><td>Resolution</td><td>2<sup>−8</sup> = 0.00390625</td></tr>
+    <tr><td>Multiplier</td><td>16 × 16 → 32-bit signed; one Artix-7 DSP48E1 slice</td></tr>
+    <tr><td>Accumulator</td><td>32-bit, full precision; truncated to 16-bit Q8.8 at module boundaries</td></tr>
+    <tr><td>Saturating add</td><td><code>fp_sat_add</code> in <code>transformer_pkg.sv</code> — clamps to ±0x7FFF / 0x8000</td></tr>
+    <tr><td>Multiply</td><td><code>fp_mul</code>: <code>(a·b) >>> FRAC_BITS</code> — arithmetic right-shift of the 32-bit product</td></tr>
+  </table></div>
+
+  <h3>Why fixed-point at all?</h3>
+  <ul>
+    <li><strong>One DSP per multiply.</strong> Artix-7 DSP48E1 is 25×18 signed; two Q8.8 operands fit comfortably with both inputs sign-extended.</li>
+    <li><strong>No floating-point unit.</strong> An IEEE binary16 multiplier on a 7-series part costs roughly 4× the LUT and FF count of a 16×16 fixed multiply, plus pipelining for normalise/round.</li>
+    <li><strong>Transparent.</strong> You can read a Q8.8 value off a waveform and know what it represents — useful for hand-debugging an educational design.</li>
+    <li><strong>Workload fits.</strong> With pre-LayerNorm scaling and 1/√d<sub>k</sub> on the attention scores, well-trained Q8.8 small-D activations sit comfortably inside [−8, +8] — five integer bits of headroom.</li>
+  </ul>
+
+  <h3>Where Q8.8 hurts</h3>
+  <p>Q8.8 has the same 65 536-level dynamic range as INT16 — about 1/40 of FP16's range. For D_MODEL ≥ 1024 and unscaled activations (the GPT-2-large era and beyond), per-tensor Q8.8 starts to fail because individual attention activations hit the rails. That's the regime the industry left fixed-point behind for: SmoothQuant (per-channel), AWQ (per-group), GPTQ, FP8-with-per-tile-scale (the Hopper Transformer Engine), and now NVFP4 (per-block FP4 with E4M3 scale).</p>
+
+  <p>This design lives in the small-D regime where Q8.8 works, on purpose. The package-level types make it the single point of change: edit <code>DATA_WIDTH</code>, <code>FRAC_BITS</code>, and the FP utility functions, rebuild, re-run the 84-test suite.</p>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 5: transformer_pkg.sv -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s5">
+  <div class="slide-number">05</div>
+  <h2>Module: <code>transformer_pkg.sv</code></h2>
+  <p>233 lines. The whole arithmetic library in one place — every other module imports it. Edit this file to scale the design.</p>
+
+  <h3>Parameters</h3>
+  <div class="table-wrap"><table>
+    <tr><th>Parameter</th><th>Default</th><th>Comment</th></tr>
+    <tr><td><code>D_MODEL</code></td><td>64</td><td>Embedding dimension</td></tr>
+    <tr><td><code>N_HEADS</code></td><td>4</td><td>Heads (D_HEAD = D_MODEL/N_HEADS = 16)</td></tr>
+    <tr><td><code>D_FF</code></td><td>256</td><td>FFN inner dimension (4× expansion)</td></tr>
+    <tr><td><code>MAX_SEQ_LEN</code></td><td>128</td><td>Context window</td></tr>
+    <tr><td><code>VOCAB_SIZE</code></td><td>512</td><td>Used in the bigger top-level only</td></tr>
+    <tr><td><code>DATA_WIDTH / FRAC_BITS</code></td><td>16 / 8</td><td>Q8.8</td></tr>
+    <tr><td><code>ACC_WIDTH</code></td><td>32</td><td>Full-precision MAC accumulator</td></tr>
+    <tr><td><code>PE_ROWS / PE_COLS</code></td><td>4 / 4</td><td>Systolic array shape</td></tr>
+  </table></div>
+
+  <h3>The four utility functions every other module uses</h3>
+  <div class="code-block">
+    <div class="code-header">rtl/transformer_pkg.sv — fp_mul, fp_sat_add</div>
+<pre><code><span class="cm">// Multiply two Q8.8 values, return Q8.8 (truncated)</span>
+<span class="kw">function automatic signed</span> [<span class="num">15</span>:<span class="num">0</span>] fp_mul(<span class="kw">input signed</span> [<span class="num">15</span>:<span class="num">0</span>] a, <span class="kw">input signed</span> [<span class="num">15</span>:<span class="num">0</span>] b);
+  <span class="kw">logic signed</span> [<span class="num">2</span>*DATA_WIDTH<span class="num">-1</span>:<span class="num">0</span>] product;
+  product = a * b;
+  <span class="kw">return</span> to_data(product &gt;&gt;&gt; FRAC_BITS);
+<span class="kw">endfunction</span>
+
+<span class="cm">// Saturating add for Q8.8</span>
+<span class="kw">function automatic signed</span> [<span class="num">15</span>:<span class="num">0</span>] fp_sat_add(<span class="kw">input signed</span> [<span class="num">15</span>:<span class="num">0</span>] a, <span class="kw">input signed</span> [<span class="num">15</span>:<span class="num">0</span>] b);
+  <span class="kw">logic signed</span> [DATA_WIDTH:<span class="num">0</span>] sum;
+  sum = {a[DATA_WIDTH<span class="num">-1</span>], a} + {b[DATA_WIDTH<span class="num">-1</span>], b};
+  <span class="kw">if</span> (sum &gt; <span class="fn">$signed</span>({<span class="num">1'b0</span>, {(DATA_WIDTH<span class="num">-1</span>){<span class="num">1'b1</span>}}}))      <span class="kw">return</span> {<span class="num">1'b0</span>, {(DATA_WIDTH<span class="num">-1</span>){<span class="num">1'b1</span>}}};
+  <span class="kw">else if</span> (sum &lt; <span class="fn">$signed</span>({<span class="num">1'b1</span>, {(DATA_WIDTH<span class="num">-1</span>){<span class="num">1'b0</span>}}})) <span class="kw">return</span> {<span class="num">1'b1</span>, {(DATA_WIDTH<span class="num">-1</span>){<span class="num">1'b0</span>}}};
+  <span class="kw">else</span> <span class="kw">return</span> to_data(sum[DATA_WIDTH<span class="num">-1</span>:<span class="num">0</span>]);
+<span class="kw">endfunction</span></code></pre>
+  </div>
+
+  <h3>The interesting one: <code>fp_inv_sqrt</code></h3>
+  <p>A division-free reciprocal-square-root, ~12 bits of accuracy in Q8.8. The same <em>shape</em> of code (CLZ → normalise → 32-entry LUT → one Newton–Raphson step → denormalise) appears three times in the design: here for LayerNorm's 1/√σ², in <code>softmax_unit</code> for 1/Σexp, and as a pattern that students can transplant to any Q-format reciprocal they need. The key trick is <em>CLZ-normalise once, denormalise at the end</em> — it lets a 32-entry LUT cover the full 16-bit input range to identical accuracy across decades.</p>
+
+  <p>For odd leading-zero counts the code multiplies by a Q2.14 constant for √2 (= 23170) so the binary-only shift can resume after the LUT step. This is verbatim what x86's <code>RSQRTSS</code> and ARM's <code>VRSQRTE.F</code> do internally — minus the IEEE rounding modes.</p>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 6: processing_element.sv -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s6">
+  <div class="slide-number">06</div>
+  <h2>Module: <code>processing_element.sv</code></h2>
+  <p>52 lines. The smallest possible MAC tile — three flops, one multiplier, one adder. Same shape as Kung &amp; Leiserson 1978; same shape as a single TPU MXU lane in 2025. The pattern is forty-eight years old and still right.</p>
+
+  <div class="code-block">
+    <div class="code-header">rtl/processing_element.sv — the whole module</div>
+<pre><code><span class="kw">always</span> @(<span class="kw">posedge</span> clk <span class="kw">or negedge</span> rst_n) <span class="kw">begin</span>
+  <span class="kw">if</span> (!rst_n) <span class="kw">begin</span>
+    a_out <span class="kw">&lt;=</span> 0; w_out <span class="kw">&lt;=</span> 0; accumulator <span class="kw">&lt;=</span> 0;
+  <span class="kw">end else if</span> (clear) <span class="kw">begin</span>
+    a_out <span class="kw">&lt;=</span> 0; w_out <span class="kw">&lt;=</span> 0; accumulator <span class="kw">&lt;=</span> 0;
+  <span class="kw">end else if</span> (enable) <span class="kw">begin</span>
+    a_out       <span class="kw">&lt;=</span> a_in;                            <span class="cm">// skew east</span>
+    w_out       <span class="kw">&lt;=</span> w_in;                            <span class="cm">// skew south</span>
+    accumulator <span class="kw">&lt;=</span> accumulator + (to_acc(a_in) * to_acc(w_in));
+  <span class="kw">end</span>
+<span class="kw">end</span>
+
+<span class="kw">assign</span> acc_out = accumulator;</code></pre>
+  </div>
+
+  <h3>What's interesting</h3>
+  <ul>
+    <li><strong>Output-stationary.</strong> The accumulator never moves; A and B operands flow past. Identical pattern to Google's TPU MXU. Compare with the <code>mmul_pe.sv</code> in the companion <a href="https://github.com/BrendanJamesLynskey/AI_MMUL_Unit">AI_MMUL_Unit</a> repo — line-for-line equivalent.</li>
+    <li><strong>Asynchronous active-low reset.</strong> Every flop in the design uses <code>posedge clk or negedge rst_n</code>; this is the Xilinx 7-series convention so it will stay in BRAM-aware retiming and not block CDC checks.</li>
+    <li><strong>Synchronous clear.</strong> Lets the array zero its accumulators between matrix tiles without a global reset.</li>
+    <li><strong>Sign-extension via <code>to_acc</code>.</strong> The 16→32-bit sign-extension is wrapped in a package-level helper because iverilog 10.1 mishandled inline <code>{{16{a[15]}}, a}</code>. A workaround that became a clarification.</li>
+  </ul>
+
+  <h3>Synthesis result on Artix-7 (xc7a35t, 100 MHz target)</h3>
+  <div class="table-wrap"><table>
+    <tr><th>Metric</th><th>Value</th></tr>
+    <tr><td>LUTs</td><td>34</td></tr>
+    <tr><td>FFs</td><td>64</td></tr>
+    <tr><td>DSP48E1</td><td>1</td></tr>
+    <tr><td>Fmax</td><td>229.9 MHz</td></tr>
+  </table></div>
+
+  <p>One DSP, one PE. The 4×4 array uses 16 DSPs — under 30% of the xc7a35t's 90 DSP48E1 slices. Headroom for an 8×8 array is real on this part.</p>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 7: systolic_array.sv -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s7">
+  <div class="slide-number">07</div>
+  <h2>Module: <code>systolic_array.sv</code></h2>
+  <p>92 lines. Generates ROWS × COLS PEs, wires their A-east and B-south chains, and tracks a completion counter so the host can tell when the last accumulator has settled.</p>
+
+  <h3>Topology</h3>
+  <div class="canvas-wrap">
+    <svg viewBox="0 0 720 290" width="720" height="290" xmlns="http://www.w3.org/2000/svg">
+      <defs>
+        <marker id="arr2" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
+          <path d="M0,0 L0,6 L5,3 z" fill="#38bdf8"/>
+        </marker>
+      </defs>
+      <g font-family="JetBrains Mono" font-size="11" fill="#e6edf3">
+        <text x="20" y="60" fill="#60a5fa">A[0,*]→</text>
+        <text x="20" y="120" fill="#60a5fa">A[1,*]→</text>
+        <text x="20" y="180" fill="#60a5fa">A[2,*]→</text>
+        <text x="20" y="240" fill="#60a5fa">A[3,*]→</text>
+        <text x="120" y="20" fill="#a78bfa">B[*,0]↓</text>
+        <text x="240" y="20" fill="#a78bfa">B[*,1]↓</text>
+        <text x="360" y="20" fill="#a78bfa">B[*,2]↓</text>
+        <text x="480" y="20" fill="#a78bfa">B[*,3]↓</text>
+        <text x="610" y="155" fill="#10b981">acc[r,c]</text>
+      </g>
+      <g fill="#161b22" stroke="#38bdf8">
+        <rect x="100" y="40"  width="80" height="50" rx="4"/><rect x="220" y="40"  width="80" height="50" rx="4"/>
+        <rect x="340" y="40"  width="80" height="50" rx="4"/><rect x="460" y="40"  width="80" height="50" rx="4"/>
+        <rect x="100" y="100" width="80" height="50" rx="4"/><rect x="220" y="100" width="80" height="50" rx="4"/>
+        <rect x="340" y="100" width="80" height="50" rx="4"/><rect x="460" y="100" width="80" height="50" rx="4"/>
+        <rect x="100" y="160" width="80" height="50" rx="4"/><rect x="220" y="160" width="80" height="50" rx="4"/>
+        <rect x="340" y="160" width="80" height="50" rx="4"/><rect x="460" y="160" width="80" height="50" rx="4"/>
+        <rect x="100" y="220" width="80" height="50" rx="4"/><rect x="220" y="220" width="80" height="50" rx="4"/>
+        <rect x="340" y="220" width="80" height="50" rx="4"/><rect x="460" y="220" width="80" height="50" rx="4"/>
+      </g>
+      <g font-family="JetBrains Mono" font-size="10" fill="#38bdf8" text-anchor="middle">
+        <text x="140" y="70">PE 0,0</text><text x="260" y="70">PE 0,1</text><text x="380" y="70">PE 0,2</text><text x="500" y="70">PE 0,3</text>
+        <text x="140" y="130">PE 1,0</text><text x="260" y="130">PE 1,1</text><text x="380" y="130">PE 1,2</text><text x="500" y="130">PE 1,3</text>
+        <text x="140" y="190">PE 2,0</text><text x="260" y="190">PE 2,1</text><text x="380" y="190">PE 2,2</text><text x="500" y="190">PE 2,3</text>
+        <text x="140" y="250">PE 3,0</text><text x="260" y="250">PE 3,1</text><text x="380" y="250">PE 3,2</text><text x="500" y="250">PE 3,3</text>
+      </g>
+      <g stroke="#38bdf8" fill="none" marker-end="url(#arr2)">
+        <line x1="180" y1="65"  x2="216" y2="65"/><line x1="300" y1="65"  x2="336" y2="65"/><line x1="420" y1="65"  x2="456" y2="65"/>
+        <line x1="180" y1="125" x2="216" y2="125"/><line x1="300" y1="125" x2="336" y2="125"/><line x1="420" y1="125" x2="456" y2="125"/>
+        <line x1="180" y1="185" x2="216" y2="185"/><line x1="300" y1="185" x2="336" y2="185"/><line x1="420" y1="185" x2="456" y2="185"/>
+        <line x1="180" y1="245" x2="216" y2="245"/><line x1="300" y1="245" x2="336" y2="245"/><line x1="420" y1="245" x2="456" y2="245"/>
+        <line x1="140" y1="90"  x2="140" y2="100"/><line x1="140" y1="150" x2="140" y2="160"/><line x1="140" y1="210" x2="140" y2="220"/>
+        <line x1="260" y1="90"  x2="260" y2="100"/><line x1="260" y1="150" x2="260" y2="160"/><line x1="260" y1="210" x2="260" y2="220"/>
+        <line x1="380" y1="90"  x2="380" y2="100"/><line x1="380" y1="150" x2="380" y2="160"/><line x1="380" y1="210" x2="380" y2="220"/>
+        <line x1="500" y1="90"  x2="500" y2="100"/><line x1="500" y1="150" x2="500" y2="160"/><line x1="500" y1="210" x2="500" y2="220"/>
+      </g>
+    </svg>
+  </div>
+  <p class="cm" style="text-align: center; font-style: italic;">A streams left→right (blue), B streams top→bottom (purple), accumulators stay put (green).</p>
+
+  <h3>Latency accounting</h3>
+  <ul>
+    <li><strong>Fill</strong>: ROWS + COLS − 1 = 7 cycles before every PE has a valid operand pair.</li>
+    <li><strong>Steady-state</strong>: K cycles, R·C MACs each.</li>
+    <li><strong>Drain</strong>: same as fill once enable drops.</li>
+    <li><strong><code>done</code> assertion</strong>: a long-standing one-cycle bug here was fixed in commit <code>bdc0614</code>. The cycle counter pre-increments, so the comparison threshold is <code>ROWS + COLS − 2</code>, not <code>− 1</code>. The corrected RTL asserts <code>done</code> on exactly the cycle where PE(R−1, C−1) registers its final partial sum. The TB <code>tb_systolic_array.sv</code> was updated to verify this.</li>
+  </ul>
+
+  <h3>Why output-stationary, not weight-stationary?</h3>
+  <p>This design loads a fresh weight tile for every projection (Q, K, V, O, FFN<sub>1</sub>, FFN<sub>2</sub>), so weights aren't reused enough to amortise weight-stationary's load cost. Output-stationary is also the natural shape for the QKᵀ score computation, which dominates per-head cycles. NVDLA, Apple ANE, and most edge NPUs go weight-stationary <em>only</em> because they hold a whole layer's weights in SRAM for batched inference — a regime this small reference design doesn't aim at.</p>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 8: softmax_unit.sv -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s8">
+  <div class="slide-number">08</div>
+  <h2>Module: <code>softmax_unit.sv</code></h2>
+  <p>332 lines — the largest module in the repo by line count. Implements the standard <em>max-subtract-exp-normalise</em> recipe, every step of which is approximated:</p>
+
+  <pre class="ascii-art">  S_IDLE ─► S_FIND_MAX ─► S_SUBTRACT_EXP ─► S_SUM ─► S_RECIP ─► S_NORMALIZE ─► S_DONE</pre>
+
+  <h3>Step 1 — find max (numerical stability)</h3>
+  <p>One pass over the input vector, holding the running maximum. Standard textbook trick: subtracting max(x) before exp prevents overflow without changing the result, because softmax is shift-invariant.</p>
+
+  <h3>Step 2 — PWL exp approximation</h3>
+  <p>A <strong>4-segment piecewise-linear approximation of exp(x)</strong> over the negative range — that's all softmax ever sees after subtracting max:</p>
+  <div class="code-block">
+    <div class="code-header">rtl/softmax_unit.sv — approx_exp</div>
+<pre><code><span class="kw">function automatic signed</span> [<span class="num">15</span>:<span class="num">0</span>] approx_exp(<span class="kw">input signed</span> [<span class="num">15</span>:<span class="num">0</span>] x);
+  <span class="kw">if</span> (x &gt;= 0)               <span class="kw">return</span> <span class="num">16'sh0100</span>;                      <span class="cm">// exp(0) = 1.0</span>
+  <span class="kw">else if</span> (x &gt; <span class="num">-16'sh0100</span>)  <span class="kw">return</span> <span class="num">16'sh0100</span> + x;                  <span class="cm">// (-1, 0): linear</span>
+  <span class="kw">else if</span> (x &gt; <span class="num">-16'sh0200</span>) <span class="kw">begin</span>                                 <span class="cm">// (-2, -1)</span>
+    result = <span class="num">16'sh0060</span> + (x + <span class="num">16'sh0100</span>) &gt;&gt;&gt; <span class="num">1</span>;                  <span class="cm">// ~0.375 + 0.5*(x+1)</span>
+    <span class="kw">return</span> (result &gt; 0) ? result : <span class="num">16'sh0004</span>;
+  <span class="kw">end else if</span> (x &gt; <span class="num">-16'sh0400</span>) <span class="kw">begin</span>                          <span class="cm">// (-4, -2)</span>
+    result = <span class="num">16'sh0020</span> + (x + <span class="num">16'sh0200</span>) &gt;&gt;&gt; <span class="num">2</span>;                  <span class="cm">// ~0.125 + 0.25*(x+2)</span>
+    <span class="kw">return</span> (result &gt; 0) ? result : <span class="num">16'sh0004</span>;
+  <span class="kw">end else</span>                  <span class="kw">return</span> <span class="num">16'sh0004</span>;                      <span class="cm">// floor for very negative</span>
+<span class="kw">endfunction</span></code></pre>
+  </div>
+  <p>This is good enough for token-selection ordering (which is all that matters for greedy/argmax decoding) and produces probabilities that sum to ≈ 1.0 within a few LSBs in Q8.8. The TB confirms <code>Σprobs ≈ 0xFE / 0x100</code> for an 8-element uniform input.</p>
+
+  <h3>Step 3 — sum the exps, then reciprocal</h3>
+  <p>Computing <code>p_i = exp(x_i) / Σexp</code> would need a divider. Instead the unit computes <code>recip = 65536 / exp_sum</code> in one shared cycle, then multiplies each <code>exp_i</code> by <code>recip</code> with the same <code>fp_mul</code> the rest of the design uses. Because <code>fp_mul</code> implicitly does <code>(a·b) >> 8</code>, the formula works out to <code>(exp_i &lt;&lt; 8) / exp_sum</code> — exactly the original division.</p>
+  <p>The reciprocal itself uses the same CLZ-normalise → 32-entry Q2.14 LUT → one Newton–Raphson step → denormalise pattern as <code>fp_inv_sqrt</code>. Newton–Raphson here is <code>r ← r·(2 − x·r)</code>, which converges quadratically; ~12 bits of accuracy after one step is enough for Q8.8 outputs.</p>
+
+  <h3>Synthesis result</h3>
+  <div class="table-wrap"><table>
+    <tr><th>Metric</th><th>Value</th><th>Comment</th></tr>
+    <tr><td>LUTs</td><td>537</td><td>Mostly the 32-entry case-LUT and the Newton step</td></tr>
+    <tr><td>FFs</td><td>584</td><td>FSM, exp_vals[], shifted[], idx</td></tr>
+    <tr><td>DSP48E1</td><td>3</td><td>Reciprocal mul + Newton mul + per-element normalise</td></tr>
+    <tr><td>Fmax</td><td><strong>47.9 MHz</strong></td><td>Critical path: combinational <code>compute_reciprocal</code></td></tr>
+  </table></div>
+
+  <p>The 47.9 MHz figure is one of the two reasons the full design doesn't meet the 100 MHz target. Pipelining the reciprocal across two FSM states would more-than-double Fmax — the deferred work is documented in <code>README.md</code>.</p>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 9: layer_norm.sv -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s9">
+  <div class="slide-number">09</div>
+  <h2>Module: <code>layer_norm.sv</code></h2>
+  <p>151 lines. Computes y<sub>i</sub> = γ<sub>i</sub> · (x<sub>i</sub> − μ) / √(σ² + ε) + β<sub>i</sub> across a VEC_LEN-element vector. The interesting part is what's <em>not</em> here: any divider.</p>
+
+  <pre class="ascii-art">  S_IDLE ─► S_MEAN ─► S_VARIANCE ─► S_NORMALIZE ─► S_DONE</pre>
+
+  <h3>Three division-replacement tricks in one module</h3>
+  <ul>
+    <li><strong>Mean</strong>: <code>μ = (Σx<sub>i</sub>) >>> log₂(VEC_LEN)</code>. The runtime <code>$fatal</code> at instantiation enforces VEC_LEN = power of two — added in commit <code>fed82e7</code> after a code review caught that <code>>>></code> would silently round for non-power-of-2 lengths.</li>
+    <li><strong>Variance</strong>: same shift trick on Σ(x<sub>i</sub> − μ)².</li>
+    <li><strong>1/√(σ² + ε)</strong>: <code>fp_inv_sqrt</code> from the package — a CLZ-normalised, LUT-seeded, Newton–Raphson-refined reciprocal square root. Same shape as <code>compute_reciprocal</code> in <code>softmax_unit</code>.</li>
+  </ul>
+
+  <p>The +1 epsilon (literal <code>16'sh0001</code> = 1/256 in Q8.8) is enough to keep the LUT index away from zero on the constant-input case (variance = 0). The behavioural test <code>Constant→zero</code> exercises this: feed a vector of identical values, expect zero output.</p>
+
+  <h3>Why this matters</h3>
+  <p>A hardware integer divider for 32-bit values is ~600 LUTs and 12+ pipeline stages on Artix-7. Replacing it with a <strong>32-entry LUT</strong> + <strong>two 16×16 multiplies</strong> (Newton–Raphson) keeps the path entirely inside the DSP fabric. The cost is ~12 bits of accuracy — more than enough for Q8.8.</p>
+
+  <h3>Synthesis result</h3>
+  <div class="table-wrap"><table>
+    <tr><th>Metric</th><th>Value</th><th>Comment</th></tr>
+    <tr><td>LUTs</td><td>1,585</td><td>VEC_LEN = 64 is the dominant cost — <code>centered[]</code> array</td></tr>
+    <tr><td>FFs</td><td>2,157</td><td>Per-element registers across the FSM</td></tr>
+    <tr><td>DSP48E1</td><td>7</td><td>γ·(x−μ)·invstd is two cascaded muls per element</td></tr>
+    <tr><td>Fmax</td><td><strong>29.2 MHz</strong></td><td>Critical path: <code>fp_inv_sqrt</code> Newton–Raphson chain</td></tr>
+  </table></div>
+
+  <p>29.2 MHz is the slowest module in the design and therefore the system-level limiter. The path is the combinational chain inside the Newton–Raphson step: 16-bit multiply → subtract from constant → 16-bit multiply → variable shift. All inside a single FSM state. Pipelining across two FSM states is the documented path to ≥ 100 MHz.</p>
+
+  <h3>RMSNorm vs LayerNorm</h3>
+  <p>Modern LLMs (LLaMA, Qwen, Mistral) use <strong>RMSNorm</strong> instead of LayerNorm — same RSqrt path, but no mean-subtraction. RMSNorm is roughly 30% cheaper and slightly faster to train. Migrating this module to RMSNorm is mostly deletion: drop S_MEAN, drop the <code>centered[]</code> array, keep <code>fp_inv_sqrt</code>.</p>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 10: feed_forward.sv -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s10">
+  <div class="slide-number">10</div>
+  <h2>Module: <code>feed_forward.sv</code></h2>
+  <p>125 lines. Two linear layers and a ReLU. The wide-then-narrow shape every transformer FFN uses — D_MODEL=64 expands to D_FF=256, then collapses back to D_MODEL=64.</p>
+
+  <pre class="ascii-art">  S_IDLE ─► S_LINEAR1 ─► S_RELU ─► S_LINEAR2 ─► S_DONE
+              (D_FF iters)      (parallel)   (D_MODEL iters)</pre>
+
+  <h3>Why FFN is the biggest GEMM in the layer</h3>
+  <p>For one decoder layer at sequence length S, the FLOP budget breaks down (per "Attention Is All You Need" §3.3 and the standard expansion):</p>
+  <div class="table-wrap"><table>
+    <tr><th>Stage</th><th>FLOPs</th><th>Fraction</th></tr>
+    <tr><td>Q, K, V projections (3×)</td><td>6 · S · D²</td><td>~17%</td></tr>
+    <tr><td>Output projection W<sub>O</sub></td><td>2 · S · D²</td><td>~6%</td></tr>
+    <tr><td>QKᵀ scores</td><td>2 · S² · D</td><td>≪ for small S</td></tr>
+    <tr><td>scores · V</td><td>2 · S² · D</td><td>≪ for small S</td></tr>
+    <tr><td><strong>FFN expand (4D × D)</strong></td><td>8 · S · D²</td><td>~22%</td></tr>
+    <tr><td><strong>FFN contract (D × 4D)</strong></td><td>8 · S · D²</td><td>~22%</td></tr>
+  </table></div>
+  <p>FFN is roughly 44% of the layer for typical S, and at single-token inference (S = 1) it's the dominant compute. This is why GPT-3, GPT-4, and LLaMA all keep the 4× FFN ratio — and why FlashAttention, which optimises the attention block, has so little to say about FFN.</p>
+
+  <h3>The ReLU choice (not SwiGLU)</h3>
+  <p>Modern LLMs use <strong>SwiGLU</strong> (Shazeer 2020): three weight matrices, two for the gate, one for the projection, sigmoid(W₁x) ⊙ (W₂x) → W₃ projection. SwiGLU outperforms ReLU on training perplexity but costs 3 GEMMs and a sigmoid per token instead of 2 GEMMs. The reference design uses <strong>plain ReLU</strong> because:</p>
+  <ul>
+    <li>One sign-bit test per element — zero hardware cost.</li>
+    <li>Drop-in replacement: any FP-domain non-linearity (GeLU, SiLU, SwiGLU) plugs into S_RELU as a function.</li>
+    <li>Educational clarity: the FFN is two GEMMs separated by a non-linearity. ReLU keeps that obvious.</li>
+  </ul>
+
+  <h3>What's missing for a "real" FFN</h3>
+  <ul>
+    <li>No bias support for SwiGLU's gate path.</li>
+    <li>S_LINEAR1 and S_LINEAR2 use a sequential <code>for j</code> loop accumulator — they could use the systolic array. Doing so would cut FFN cycles from O(D_MODEL · D_FF) to ~O(max(D_MODEL, D_FF)) but at the cost of weight-tile bookkeeping. Straightforward as future work; left out to keep the FSM readable.</li>
+  </ul>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 11: multi_head_attention.sv -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s11">
+  <div class="slide-number">11</div>
+  <h2>Module: <code>multi_head_attention.sv</code></h2>
+  <p>362 lines. The single biggest module in the repo. Implements the canonical scaled-dot-product attention from "Attention Is All You Need" §3.2 — minus the divide-by-√d_k, which is folded into pre-scaling of the weights.</p>
+
+  <pre class="ascii-art">  Attention(Q,K,V) = softmax(Q·Kᵀ / √d_k) · V    over each of N_HEADS in parallel</pre>
+
+  <h3>Ten-state FSM</h3>
+  <div class="table-wrap"><table>
+    <tr><th>State</th><th>Cycles</th><th>What happens</th></tr>
+    <tr><td>S_IDLE</td><td>1</td><td>Wait for <code>start</code></td></tr>
+    <tr><td>S_PROJ_QKV</td><td>3 · D_MODEL</td><td>Compute fresh Q, K, V vectors for current token</td></tr>
+    <tr><td>S_WRITE_CACHE</td><td>1</td><td>Append K, V at <code>seq_pos</code> in the cache</td></tr>
+    <tr><td>S_SCORE</td><td>N_HEADS · seq_pos · D_HEAD</td><td>Compute Q · Kᵀ scores over all past positions</td></tr>
+    <tr><td>S_SOFTMAX_PREP</td><td>1</td><td>Pad scores beyond <code>seq_pos</code> with −128.0 (causal mask)</td></tr>
+    <tr><td>S_SOFTMAX_RUN</td><td>~5·MAX_SEQ_LEN</td><td>Run shared <code>softmax_unit</code> for this head</td></tr>
+    <tr><td>S_SOFTMAX_STORE</td><td>1</td><td>Capture probabilities</td></tr>
+    <tr><td>S_WEIGHTED_SUM</td><td>N_HEADS · D_HEAD · seq_pos</td><td>Compute Σ p<sub>i</sub> · V<sub>i</sub> per head</td></tr>
+    <tr><td>S_OUTPUT_PROJ</td><td>D_MODEL²</td><td>Concat heads, project with W<sub>O</sub></td></tr>
+    <tr><td>S_DONE</td><td>1</td><td>Pulse <code>valid</code></td></tr>
+  </table></div>
+
+  <h3>The shared softmax unit</h3>
+  <p>One <code>softmax_unit</code> instance is <strong>time-multiplexed across heads</strong>. The instance is sized for VEC_LEN = MAX_SEQ_LEN, and positions beyond <code>seq_pos</code> are padded with the smallest representable Q8.8 value (−128.0) so the PWL exp approximation forces them to ~0. This implements the <strong>causal mask</strong> as a number, not as a control bit — saves a separate masking pipeline.</p>
+
+  <h3>The KV-cache interface</h3>
+  <p>K and V for all prior positions are held in dual-port memory. On every attention step:</p>
+  <ul>
+    <li>Read all <code>K[0 .. seq_pos]</code> for QKᵀ (parallel with V reads).</li>
+    <li>Read all <code>V[0 .. seq_pos]</code> for the weighted sum.</li>
+    <li>Write the freshly-computed <code>K[seq_pos]</code> and <code>V[seq_pos]</code> for next token.</li>
+  </ul>
+  <p>In the streaming variant the cache is <code>kv_cache_bram</code> — a real dual-port BRAM that does element-by-element vector writes and single-element reads. In the non-streaming variant it's a flat unpacked array, intended only for simulation.</p>
+
+  <h3>What's not here</h3>
+  <ul>
+    <li><strong>No RoPE.</strong> Position information is implicit (the next token is appended at <code>seq_pos</code>). LLaMA-class models add Rotary Positional Embedding to Q and K before the dot product. RoPE is two element-wise multiply-adds per element — easy to insert as an extra FSM state.</li>
+    <li><strong>No FlashAttention-style fusion.</strong> The score matrix is materialised fully before softmax. For MAX_SEQ_LEN = 128 this is fine; at longer contexts a tile-and-fuse rewrite à la FA-2/FA-3 saves a factor of S in K/V re-reads.</li>
+    <li><strong>No GQA / MQA.</strong> All N_HEADS have full K, V vectors. Modern inference systems (LLaMA-2-70B onwards) use Grouped-Query Attention to share K, V across multiple Q heads — cuts KV-cache memory by 4–8×.</li>
+  </ul>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 12: transformer_decoder.sv -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s12">
+  <div class="slide-number">12</div>
+  <h2>Module: <code>transformer_decoder.sv</code></h2>
+  <p>249 lines. The conductor — instantiates LayerNorm-1, MHA, LayerNorm-2, FFN, threads them with two residual additions, and runs a 12-state top-level FSM.</p>
+
+  <pre class="ascii-art">  S_IDLE ─► S_LN1_START ─► S_LN1_WAIT ─►
+            S_ATTN_START ─► S_ATTN_WAIT ─► S_RESIDUAL1 ─►
+            S_LN2_START ─► S_LN2_WAIT ─►
+            S_FFN_START ─► S_FFN_WAIT ─► S_RESIDUAL2 ─► S_DONE</pre>
+
+  <h3>Things the conductor handles that the sub-modules don't</h3>
+  <ul>
+    <li><strong>Single-cycle <code>start</code> pulses.</strong> The default in the always-block is to drive every <code>*_start</code> low; the case statement raises one for exactly the cycle of its <code>S_xx_START</code> state. Sub-modules launch on the rising edge.</li>
+    <li><strong>Saturating residual adds.</strong> Both residuals use <code>fp_sat_add</code> rather than wrap-around. Residual + LayerNorm guarantees mid-band activations, so saturation is rare in practice; checking it is one of the behavioural-tier tests.</li>
+    <li><strong>Weight pass-through.</strong> Every weight matrix and bias vector is a top-level port. In the streaming variant they're loaded over an AXI-Lite-style bus before the FSM is launched; in the simulation variant they're set as Verilog constants. This is the cleanest split between control plane (FSM) and data plane (weights) the design has.</li>
+  </ul>
+
+  <h3>Per-token cycle budget</h3>
+  <p>Approximate, for D_MODEL=64, N_HEADS=4, seq_pos = 64 (mid-context):</p>
+  <div class="table-wrap"><table>
+    <tr><th>Stage</th><th>Cycles</th></tr>
+    <tr><td>LayerNorm 1</td><td>~200</td></tr>
+    <tr><td>MHA Q/K/V proj</td><td>~200</td></tr>
+    <tr><td>MHA score + softmax + weighted sum</td><td>~2,500</td></tr>
+    <tr><td>MHA output proj</td><td>~4,100</td></tr>
+    <tr><td>LayerNorm 2</td><td>~200</td></tr>
+    <tr><td>FFN linear 1 + ReLU + linear 2</td><td>~16,400</td></tr>
+    <tr><td><strong>Total per token</strong></td><td><strong>~24,000 cycles</strong></td></tr>
+  </table></div>
+  <p>At the achievable 29.2 MHz that's ~1.2 ms per token, ~830 tok/s — for a one-layer 64-dim toy model on a $200 FPGA. Stack 12 layers at this clock and you get ~70 tok/s, a reasonable rate for a small embedded model. The streaming variant trades throughput for area and is what synthesises within the 16 GB Vivado memory budget.</p>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 13: streaming variant -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s13">
+  <div class="slide-number">13</div>
+  <h2>Streaming variant — 99.4% fewer registers</h2>
+  <p>The repo ships <em>two</em> top-levels:</p>
+  <div class="diagram-grid cols-2">
+    <div class="diagram-panel accent-border">
+      <h4>Register-bridge (high-throughput)</h4>
+      <ul>
+        <li><code>transformer_decoder_top.sv</code></li>
+        <li>Pipeline registers at sub-module boundaries</li>
+        <li>One token, one pass; full-width registers everywhere</li>
+        <li>Designed for back-to-back token throughput</li>
+        <li>Reference; doesn't fit on a small Artix part as-is</li>
+      </ul>
+    </div>
+    <div class="diagram-panel green-border">
+      <h4>Streaming (minimum-area)</h4>
+      <ul>
+        <li><code>transformer_decoder_top_stream.sv</code></li>
+        <li>Single shared datapath, time-multiplexed</li>
+        <li>BRAM-backed weight memories (<code>weight_bram</code>, <code>kv_cache_bram</code>)</li>
+        <li><strong>−99.4% register count</strong> vs the bridge variant</li>
+        <li>The intended Artix synthesis target</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>Why two?</h3>
+  <p>For an educational repo, having both makes the trade-off concrete: the streaming variant <em>is</em> the bridge variant with the boundary registers stripped and the weights moved to BRAM. Diff one against the other and you can see, line by line, what "minimum-area" means in practice. The streaming variant's regression test (<code>tb_transformer_decoder_stream.sv</code>) produces bit-identical outputs to the bridge variant for the same weight load.</p>
+
+  <p>From <code>stream_results.log</code>:</p>
+  <pre class="ascii-art">--- Test 1: Single token at position 0 ---
+  out_emb[0] = 0097 (0.5898)   ← matches bridge variant exactly
+  out_emb[1] = ff7f (-0.5039)
+  ...
+[PASS] KV cache active: token-1 output differs from token-0
+============================================
+  Results: 4 PASSED, 0 FAILED
+============================================</pre>
+
+  <h3>The streaming pattern, in one sentence</h3>
+  <p>Replace combinational weight arrays with single-port BRAM and an address generator; replace pipeline registers between sub-modules with a single bus + handshake; let the FSM serialise everything that used to overlap. Trade ~10× fewer registers for ~3–5× more cycles per token. On Artix-7 that's the difference between "synthesises" and "exceeds 16 GB host memory".</p>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 14: KV cache -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s14">
+  <div class="slide-number">14</div>
+  <h2>KV-cache: <code>kv_cache_bram.sv</code></h2>
+
+  <p>Without a KV-cache, autoregressive generation re-projects every prior token's K and V on every step — O(n²·d) per token. With a KV-cache, only the fresh Q is computed; past K, V are read from memory — O(n·d) per token. The streaming variant uses a real dual-port BRAM (<code>bram_dp</code>) sized for MAX_SEQ_LEN × D_MODEL.</p>
+
+  <h3>Address mapping</h3>
+  <p>One BRAM each for K and V. Linear address: <code>mem[pos · D_MODEL + dim]</code> — row-major, position-major.</p>
+
+  <h3>Two-port pattern</h3>
+  <div class="table-wrap"><table>
+    <tr><th>Port</th><th>Use</th><th>Pattern</th></tr>
+    <tr><td>A (write)</td><td>Append K or V at current <code>seq_pos</code></td><td>Pulse <code>wr_start</code>, the module auto-walks D_MODEL elements from the input vector</td></tr>
+    <tr><td>B (read)</td><td>Per-element fetch by (pos, dim)</td><td>One-cycle latency, used by the score / weighted-sum loops</td></tr>
+  </table></div>
+
+  <h3>Sizing</h3>
+  <p>For MAX_SEQ_LEN = 128, D_MODEL = 64, Q8.8: 128 × 64 × 16 bits × 2 (K and V) = <strong>32 768 bits = 4 KB</strong>. Fits in two RAMB18E1 BRAMs comfortably (the xc7a35t has 50 of them).</p>
+
+  <p>By contrast, a real LLM:</p>
+  <div class="table-wrap"><table>
+    <tr><th>Model</th><th>KV cache @ FP16</th><th>KV cache @ NVFP4 (Blackwell)</th></tr>
+    <tr><td>LLaMA-2-7B, 4K context</td><td>~2 GB</td><td>~0.25 GB</td></tr>
+    <tr><td>LLaMA-2-70B, 4K context</td><td>~40 GB (~size of weights)</td><td>~5 GB</td></tr>
+    <tr><td>LLaMA-3.1-405B, 128K context</td><td>~640 GB</td><td>~80 GB</td></tr>
+  </table></div>
+  <p>That's the entire reason long-context LLM inference is HBM-bandwidth-bound rather than compute-bound. PagedAttention (vLLM, SOSP 2023) borrows OS virtual memory to cut KV waste from 60–80% to under 4%. NVIDIA has been pushing FP8 and NVFP4 KV quantisation to claw the size back. Same idea here, fifteen orders of magnitude smaller.</p>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 15: Verification -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s15">
+  <div class="slide-number">15</div>
+  <h2>Verification — three tiers, 84 tests</h2>
+
+  <div class="diagram-grid cols-3">
+    <div class="diagram-panel accent-border">
+      <h4>Tier 1 — Behavioural</h4>
+      <p><strong>54 tests, ~2 s</strong> on a laptop. <code>scripts/verify_behavioral.py</code> implements a bit-accurate Python model of the RTL: same Q8.8 representation, same truncation rules, same RSqrt LUT entries. <strong>No simulator required.</strong> The fastest path to confidence in algorithmic correctness.</p>
+    </div>
+    <div class="diagram-panel amber-border">
+      <h4>Tier 2 — RTL simulation</h4>
+      <p><strong>30 tests</strong> in <code>tb/sv/</code>, run by <code>scripts/run_sim.sh</code> under iverilog 12.0. PE, systolic array, softmax, BRAM, full decoder, streaming decoder. The integration tests reproduce known-good outputs from a Python golden model.</p>
+    </div>
+    <div class="diagram-panel green-border">
+      <h4>Tier 3 — CocoTB</h4>
+      <p>Python-driven RTL co-simulation in <code>tb/cocotb/</code>. Currently exercises PE and softmax — the modules where Python's expressiveness pays for itself in stimulus generation and golden-model comparison.</p>
+    </div>
+  </div>
+
+  <h3>What the behavioural tier covers</h3>
+  <div class="table-wrap"><table>
+    <tr><th>Module</th><th>Tests</th><th>Key checks</th></tr>
+    <tr><td>Fixed-point utilities</td><td>16</td><td>Q8.8 roundtrip · multiply with ±1 LSB tolerance · saturating add at the rails</td></tr>
+    <tr><td>Processing element</td><td>9</td><td>Single MAC · accumulate · forwarding · clear · 20-op random vs Python golden</td></tr>
+    <tr><td>Systolic array</td><td>8</td><td>2×2 matmul producing <code>[[19,22],[43,50]]</code> exactly · single-element · clear</td></tr>
+    <tr><td>Softmax unit</td><td>8</td><td>Uniform · dominant · ordering · sum ≈ 1 · back-to-back</td></tr>
+    <tr><td>Layer norm</td><td>5</td><td>Constant→zero · symmetry · γ/β scaling · centering</td></tr>
+    <tr><td>Feed-forward</td><td>4</td><td>ReLU zeroing · bias propagation</td></tr>
+    <tr><td>Decoder integration</td><td>4</td><td>Full pipeline · KV-cache · 2-token sequential</td></tr>
+  </table></div>
+
+  <h3>Recent fixes — git log as a verification record</h3>
+  <ul>
+    <li><code>bdc0614</code> — <em>Fix systolic_array done signal: asserted one cycle too late.</em></li>
+    <li><code>b4cb919</code> — <em>Fix clz16 return type and add default cases to LUTs.</em> CLZ for 16-bit needs to return a 5-bit result so the all-zero input maps to 16; default cases protect synthesis against X/Z propagation.</li>
+    <li><code>0d99b46</code> — <em>tb_transformer_decoder: replace fake Test 2 with real KV-cache check.</em></li>
+    <li><code>a7ce1a1</code> — <em>tb_softmax: fix Tests 1 and 4 to actually detect failures.</em> A test that always passes is worse than no test. Two were rewritten to compare against expected probabilities, not just "non-zero".</li>
+    <li><code>6bda9a7</code> — <em>run_sim.sh: detect and propagate [FAIL] assertion failures.</em></li>
+    <li><code>fed82e7</code> — <em>layer_norm: add runtime assertion for power-of-2 VEC_LEN.</em></li>
+  </ul>
+  <p>That's six bugs caught after the initial release. Each one became a TB; each TB is in the regression suite.</p>
+
+  <h3>Structural lint — <code>scripts/lint_check.py</code></h3>
+  <p>Walks all eight RTL files, checks module/endmodule balance, package imports, reset patterns (<code>posedge clk or negedge rst_n</code>), and cross-file instantiation resolution. Cheap to run, catches typos that iverilog's parser elides.</p>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 16: Synthesis -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s16">
+  <div class="slide-number">16</div>
+  <h2>Synthesis on Artix-7 — what's tight, what's slack</h2>
+  <p>Vivado 2025.2, target <strong>xc7a35tcpg236-1</strong>, 100 MHz clock constraint. The full top-level exceeded the host's 16 GB memory budget, so sub-modules were synthesised individually. The numbers below are <em>per-sub-module</em> and aren't additive (the array shares logic with the PEs it contains).</p>
+
+  <div class="table-wrap"><table>
+    <tr><th>Module</th><th>LUTs</th><th>FFs</th><th>BRAM</th><th>DSP48E1</th><th>Fmax (MHz)</th><th>Comment</th></tr>
+    <tr><td><strong>processing_element</strong></td><td>34</td><td>64</td><td>0</td><td>1</td><td>229.9</td><td>Headroom for 2× clock</td></tr>
+    <tr><td><strong>systolic_array</strong> (4×4)</td><td>455</td><td>901</td><td>0</td><td>16</td><td>156.8</td><td>Skew-flop chain limits Fmax</td></tr>
+    <tr><td><strong>softmax_unit</strong></td><td>537</td><td>584</td><td>0</td><td>3</td><td><strong>47.9</strong></td><td>Critical: combinational reciprocal</td></tr>
+    <tr><td><strong>layer_norm</strong></td><td>1,585</td><td>2,157</td><td>0</td><td>7</td><td><strong>29.2</strong></td><td>Critical: Newton–Raphson chain</td></tr>
+    <tr><td><strong>transformer_decoder_top</strong> (estimated)</td><td>~2,611</td><td>~3,706</td><td>0</td><td>~27</td><td>≤ 29.2</td><td>System-level Fmax bound by layer_norm</td></tr>
+  </table></div>
+
+  <h3>Why 100 MHz wasn't met</h3>
+  <p>Two modules contain combinational logic inside a single FSM state that's too long for a 10 ns period:</p>
+  <ul>
+    <li><strong>layer_norm</strong>: <code>fp_inv_sqrt</code> is fully combinational. Its critical path is mul → subtract → mul → variable shift, all in 1 cycle. Pipelining across two FSM states (a register between the LUT-and-mul and the second-mul-and-shift) restores ≥ 100 MHz.</li>
+    <li><strong>softmax_unit</strong>: <code>compute_reciprocal</code> has the same shape — same fix.</li>
+  </ul>
+  <p>This isn't a bug; it's a deliberate trade. The combinational implementation is one screen of code; the pipelined version is two — and an educational design is allowed to leave the pipeline as homework. The README documents the gap.</p>
+
+  <h3>What it costs on a 7-series xc7a35t</h3>
+  <p>Total budget: 20 800 LUTs, 41 600 FFs, 50 BRAM, 90 DSP48E1.</p>
+  <ul>
+    <li>The streaming top-level fits in <strong>~12% of LUTs, ~9% of FFs, ~30% of DSPs</strong>.</li>
+    <li>An 8×8 systolic array (4× more compute) would still leave ≥ 50% of DSPs free.</li>
+    <li>Adding RoPE, GQA, and a real RMSNorm would not move the needle on Artix-7 utilisation.</li>
+  </ul>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 17: History -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s17">
+  <div class="slide-number">17</div>
+  <h2>A short history of transformer hardware</h2>
+
+  <div class="table-wrap"><table>
+    <tr><th>Year</th><th>Event</th></tr>
+    <tr><td>1978</td><td>Kung &amp; Leiserson, <em>Systolic Arrays for VLSI</em>. The PE/array shape that this repo's <code>processing_element</code>/<code>systolic_array</code> modules still implement.</td></tr>
+    <tr><td>2015</td><td><strong>Google TPU v1</strong> — 256×256 INT8 systolic, deployed for inference SLA.</td></tr>
+    <tr><td>2017</td><td>Vaswani et al., <strong>"Attention Is All You Need"</strong> (NeurIPS, arXiv:1706.03762). Transformer is born.</td></tr>
+    <tr><td>2017</td><td>Microsoft Project Brainwave — FPGA "soft NPU" on Stratix 10, 39.5 TFLOPS at sub-ms latency in MS-FP8.</td></tr>
+    <tr><td>2017</td><td>NVIDIA V100 ships first <strong>Tensor Core</strong> (4×4×4, FP16 mul / FP32 acc) — pre-transformer in target, but the GEMM accelerator that won the transformer era.</td></tr>
+    <tr><td>2018</td><td>Habana Goya HL-1000 — first commercial deep-learning inference accelerator. CNN-and-BERT-class.</td></tr>
+    <tr><td>2018</td><td>Google Edge TPU — 4 TOPS INT8 at 2 W. Pure CNN; no useful transformer support.</td></tr>
+    <tr><td>2020</td><td><strong>A³ (HPCA)</strong> — Ham et al., the first major paper to architect attention as a hardware primitive. ELSA (ISCA 2021), SpAtten (HPCA 2021), FACT (ISCA 2023) follow.</td></tr>
+    <tr><td>2020</td><td>NVIDIA A100 — TF32, BF16, FP64 TC, 2:4 sparsity, 312 TFLOPS BF16. The first GPU on which 100B-parameter models trained in production.</td></tr>
+    <tr><td>2020</td><td><strong>FTRANS</strong> (Li et al., ISLPED) — block-circulant BERT on FPGA, 8.8× energy improvement vs GPU.</td></tr>
+    <tr><td>2021</td><td><strong>EdgeBERT</strong> (Tambe et al., MICRO) — entropy-based early exit + adaptive attention span on a 12 nm ASIC.</td></tr>
+    <tr><td>2021</td><td><strong>FQ-BERT</strong> (Liu et al., DATE) — fully integer/fixed-point BERT including softmax and LayerNorm in the integer domain. Direct ancestor of this repo's algorithmic moves.</td></tr>
+    <tr><td>2022</td><td><strong>FlashAttention</strong> (Dao et al., NeurIPS, arXiv:2205.14135) — reduces attention HBM traffic to O(N²d²/M); 2–4× speedup with no approximation. Hardware-software co-design lesson of the decade.</td></tr>
+    <tr><td>2022</td><td>NVIDIA H100 + <strong>Transformer Engine</strong> — per-layer FP8 statistics, 1979 TFLOPS FP8 dense.</td></tr>
+    <tr><td>2024</td><td><strong>FlashAttention-3</strong> (Shah et al., arXiv:2407.08608) — Hopper-aware, 740 TFLOPS FP16, ~75% peak utilisation, ~1.2 PFLOPS FP8.</td></tr>
+    <tr><td>2024</td><td>NVIDIA Blackwell B200 — FP4, NVFP4 (16-element block, FP8 E4M3 scale); 20 PFLOPS FP4.</td></tr>
+    <tr><td>2024</td><td>Google TPU v6e Trillium — MXU enlarged from 128×128 to 256×256, first resize since 2017.</td></tr>
+    <tr><td>2024</td><td><strong>Etched Sohu</strong> announced — first transformer-only ASIC.</td></tr>
+    <tr><td>2025</td><td>NVIDIA <strong>Blackwell Ultra</strong> doubles SFU <code>MUFU.EX2</code> throughput. The first GPU generation where softmax is treated as a first-class architectural concern.</td></tr>
+  </table></div>
+
+  <p>The throughline: every generation, the silicon learns one more thing about transformers. Pre-2020 it learned "you need a lot of MACs". 2022 it learned "you need 8-bit numbers and per-layer scales". 2024 it learned "you need an explicit memory primitive (TMA, TMEM)". 2025 it learned "softmax is on the critical path; the SFU has to be wider". Forty-eight years from Kung's PE to the Blackwell Ultra SFU — the primitive doesn't change, the surroundings do.</p>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 18: NVIDIA Hopper Transformer Engine -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s18">
+  <div class="slide-number">18</div>
+  <h2>Real systems — NVIDIA Hopper Transformer Engine</h2>
+
+  <p>Hopper (2022) was the first GPU architecture marketed by reference to a non-GEMM workload. The <strong>Transformer Engine</strong> isn't a separate IP block — it's a software runtime + hardware features that turn each forward/backward pass into a per-layer scaled FP8 matmul.</p>
+
+  <h3>What the Transformer Engine actually does</h3>
+  <ol>
+    <li>Profile the activation/weight tensor's max-abs in FP16.</li>
+    <li>Pick a <strong>per-layer scaling factor</strong> so the tensor fits FP8's range. Two FP8 formats:
+      <ul>
+        <li><strong>E4M3</strong>: 4-bit exponent, 3-bit mantissa, range ~ ±448 — used for <em>forward weights and activations</em>, where precision matters.</li>
+        <li><strong>E5M2</strong>: 5-bit exponent, 2-bit mantissa, range ~ ±57 344 — used for <em>gradients</em>, where range matters.</li>
+      </ul>
+    </li>
+    <li>Cast the tensor to FP8, multiply on the 4th-gen Tensor Core, accumulate in FP32.</li>
+    <li>Cast back to BF16/FP16 for downstream non-GEMM ops (LayerNorm, softmax, residual).</li>
+  </ol>
+
+  <h3>The two enabling primitives</h3>
+  <ul>
+    <li><strong>TMA — Tensor Memory Accelerator.</strong> Async multi-dimensional DMA from HBM into shared memory. Decouples operand-fetch from compute warps so the SM is never operand-bound.</li>
+    <li><strong>4th-gen Tensor Cores.</strong> Native FP8 ops, 2× the throughput per area vs Ampere's BF16 path.</li>
+  </ul>
+
+  <h3>How the reference design compares (very loosely)</h3>
+  <div class="table-wrap"><table>
+    <tr><th>Feature</th><th>H100 Transformer Engine</th><th>This repo</th></tr>
+    <tr><td>Datatype</td><td>FP8 E4M3 / E5M2 + BF16 acc</td><td>Q8.8 mul + 32-bit acc</td></tr>
+    <tr><td>Per-layer scale</td><td>Yes, runtime-managed</td><td>No — fixed-point only</td></tr>
+    <tr><td>GEMM topology</td><td>4×8×16 reduction-tree TC × 132 SMs</td><td>4×4 output-stationary systolic × 1</td></tr>
+    <tr><td>Async DMA</td><td>TMA</td><td>None</td></tr>
+    <tr><td>Softmax</td><td>SFU <code>MUFU.EX2</code> + warp shuffle reduction</td><td>FSM, PWL exp, reciprocal LUT</td></tr>
+    <tr><td>Norm</td><td>Vector lane, FP16/BF16 div</td><td>FSM, RSqrt LUT + Newton–Raphson, no divider</td></tr>
+    <tr><td>Peak FP8 dense</td><td><strong>1 979 TFLOPS</strong></td><td>~3 GMAC/s @ 29 MHz</td></tr>
+  </table></div>
+
+  <p>The ratio is roughly 10⁹. The architectural moves are the same — block GEMM, max-subtract softmax, normalise, residual. Implementing them in 1 500 lines of SystemVerilog instead of 50 million transistors is the entire point.</p>
+
+  <div class="callout">
+    <div class="callout-label">Common confusion</div>
+    <p>"H100 does 989 TFLOPS" cites <strong>BF16</strong>. The <strong>FP8</strong> figure is 1 979 TFLOPS dense or 3 958 sparse. Tech press articles routinely compare H100 BF16 to AMD/TPU FP8 — apples vs oranges.</p>
+  </div>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 19: Blackwell, Trillium, Trainium, MI300 -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s19">
+  <div class="slide-number">19</div>
+  <h2>Real systems — Blackwell, Trillium, Trainium, MI300</h2>
+
+  <div class="diagram-grid cols-2">
+    <div class="diagram-panel accent-border">
+      <h4>NVIDIA Blackwell B200 (2024)</h4>
+      <ul>
+        <li>4NP TSMC, dual-die, 192 GB HBM3e, 8 TB/s</li>
+        <li>5th-gen Tensor Core, <strong>20 PFLOPS FP4 dense</strong></li>
+        <li><strong>NVFP4</strong>: 16-element block + FP8 E4M3 scale + per-tensor FP32 scale</li>
+        <li><strong>TMEM</strong> — 256 KB/SM tensor-private memory</li>
+        <li>Blackwell Ultra (2025): <strong>2× SFU EX2 throughput</strong> for softmax</li>
+      </ul>
+    </div>
+    <div class="diagram-panel accent-border">
+      <h4>Google TPU v6e Trillium (2024)</h4>
+      <ul>
+        <li>4 nm, MXU enlarged 128×128 → <strong>256×256</strong></li>
+        <li>BF16 / INT8, ~926 TFLOPS BF16</li>
+        <li>SparseCore for embedding lookups (LM head)</li>
+        <li>OCS pod fabric — runtime-reshapeable</li>
+        <li>v7 Ironwood (2025) adds FP8 → ~4.6 PFLOPS</li>
+      </ul>
+    </div>
+    <div class="diagram-panel accent-border">
+      <h4>AWS Trainium2 (2024)</h4>
+      <ul>
+        <li>NeuronCore-v2: 4 heterogeneous engines</li>
+        <li>Tensor (matmul) · Vector · Scalar · GpSimd</li>
+        <li>~667 TFLOPS BF16 / FP8</li>
+        <li>96 GB HBM3e, NeuronLink fabric</li>
+      </ul>
+    </div>
+    <div class="diagram-panel accent-border">
+      <h4>AMD MI300X / MI355X</h4>
+      <ul>
+        <li>192 GB HBM3 / 256 GB HBM3e</li>
+        <li>MI300X: 1.3 PFLOPS FP16, 2.6 PFLOPS FP8</li>
+        <li>MI355X: <strong>FP4 / MXFP4</strong> support, ~5 PFLOPS FP4</li>
+        <li>Same per-block scale story as NVIDIA's NVFP4</li>
+      </ul>
+    </div>
+  </div>
+
+  <h3>Three different bets</h3>
+  <ul>
+    <li><strong>NVIDIA</strong> — every generation, one new datatype + one new memory primitive. FP8+TMA (H100); FP4+TMEM+wider SFU (Blackwell). General-purpose by construction.</li>
+    <li><strong>Google</strong> — keep the MXU shape stable, double the data movement. SparseCore handles the parts of the model that aren't matmul (embeddings, lookups).</li>
+    <li><strong>AWS</strong> — heterogeneous engines per core; explicit Vector/Scalar paths for softmax/norm rather than relying on a "free" SFU.</li>
+  </ul>
+
+  <p>Notice what no shipping system has: a hardwired fixed-point datapath of the kind in this repo. Production silicon picks per-layer scaled FP8/FP4 instead because (a) range adapts, and (b) the area cost of FP arithmetic is no longer dominant at 4 nm. Q8.8 lives on in <em>educational</em> and <em>edge-FPGA</em> niches — this design is squarely in the first.</p>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 20: Cerebras / Groq / Tenstorrent / Sohu / SambaNova / ANE -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s20">
+  <div class="slide-number">20</div>
+  <h2>Real systems — the rest of the field</h2>
+
+  <div class="table-wrap"><table>
+    <tr><th>Device</th><th>Topology</th><th>Datatype</th><th>Peak / SRAM</th><th>Transformer-specific feature</th></tr>
+    <tr><td><strong>Cerebras WSE-3 (CS-3)</strong></td><td>900 K cores, full 300 mm wafer, 5 nm</td><td>FP16, BF16, FP8</td><td>125 PF · <strong>44 GB SRAM</strong>, 21 PB/s</td><td>Weight Streaming + MemoryX (4 TB–2.4 PB) + SwarmX gradient reduction</td></tr>
+    <tr><td><strong>Groq LPU (TSP)</strong></td><td>Functional slices, 14 nm, 900 MHz</td><td>FP16, INT8</td><td>188 TF FP16 / 750 TOPS INT8 · 230 MB SRAM, <strong>no DRAM</strong></td><td>Compiler-scheduled deterministic everything — autoregressive decoding has constant-shape steps; static schedule wins</td></tr>
+    <tr><td><strong>Tenstorrent Wormhole / Blackhole</strong></td><td>80 / 140 Tensix cores, 12 nm / 6 nm</td><td>FP8/16, BFP2/4/8</td><td>292 / 745 TF FP8 · 210 MB SRAM (Blackhole)</td><td>Per-core matrix + vector + RISC-V, NoC mesh — dataflow that maps each transformer layer to N cores</td></tr>
+    <tr><td><strong>Tesla Dojo D1</strong></td><td>354 cores/chip × 25 chips/tile, 7 nm</td><td>FP32, BF16, <strong>CFloat8</strong></td><td>9 PF / training tile · 11 GB SRAM/tile</td><td>CFloat8 — user picks the exp/mantissa split per layer (a per-tensor analogue of Hopper's per-layer FP8 scales)</td></tr>
+    <tr><td><strong>Etched Sohu</strong> (announced 2024)</td><td>Hardwired transformer dataflow, 4 nm</td><td>FP8 (vendor claim)</td><td>vendor: 500 K tok/s Llama-70B / 8-Sohu server · 144 GB HBM3e</td><td>Whole transformer block hardwired — no flexibility for non-transformer architectures</td></tr>
+    <tr><td><strong>SambaNova SN40L</strong></td><td>RDU, 1040 PCU + 1040 PMU CGRA</td><td>BF16 / FP8</td><td>638 TFLOPS · 520 MiB SRAM + 64 GiB HBM + 1.5 TiB DDR</td><td>Streaming dataflow — compiler fuses hundreds of operators across one pipeline</td></tr>
+    <tr><td><strong>Apple Neural Engine</strong> (M4)</td><td>16-core, weight-stationary</td><td>FP16</td><td>38 TOPS · shared SoC SRAM</td><td>Native scaled-dot-product-attention layer; <code>ml-ane-transformers</code> reference reports 10× speedup, 14× lower peak memory</td></tr>
+    <tr><td><strong>Graphcore IPU (Mk2 / Bow)</strong></td><td>1472 tiles, 14 nm / wafer-on-wafer 7 nm</td><td>FP16, FP32</td><td>250 TFLOPS FP16 · 900 MB SRAM</td><td>Hardware <strong>stochastic rounding</strong> at full clock — no FP32 master-weight copy needed</td></tr>
+  </table></div>
+
+  <h3>Three philosophies, one workload</h3>
+  <ul>
+    <li><strong>Datacentre generality</strong> (NVIDIA, TPU, AMD, Trainium) — a big array, hierarchical memory, and a compiler that re-tiles for any model.</li>
+    <li><strong>Determinism &amp; in-memory</strong> (Groq, Cerebras) — banish DRAM, schedule every cycle ahead of time. Spectacular tail-latency for inference; brittle outside the supported workloads.</li>
+    <li><strong>Workload specialisation</strong> (Etched Sohu, Apple ANE) — hardwire one model class. The asymptote of "do less, faster".</li>
+  </ul>
+
+  <p>The reference design in this repo lives at the educational end of the third axis: it does <em>only</em> a transformer decoder and nothing else, and the hardwiring is its strongest feature for teaching purposes.</p>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 21: KV cache at scale -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s21">
+  <div class="slide-number">21</div>
+  <h2>The KV-cache problem at scale</h2>
+
+  <p>The KV-cache is the single biggest difference between transformer training and transformer <em>inference</em>. Training is GEMM-bound; inference, especially at long context, is HBM-bandwidth-bound — and the bandwidth is consumed by KV reads.</p>
+
+  <h3>The arithmetic</h3>
+  <p>Per token, per layer, the decoder reads <code>2 · seq · D_MODEL</code> bytes of KV and computes <code>2 · seq · D_MODEL</code> MACs. The arithmetic intensity is <strong>O(1) FLOPs per byte</strong> — the canonical memory-bound case. No matmul accelerator helps. On an H100 at single-batch inference, MMUL utilisation drops to 1–3%; the rest of the chip is idle waiting on HBM.</p>
+
+  <h3>The two industry fixes</h3>
+  <div class="diagram-grid cols-2">
+    <div class="diagram-panel accent-border">
+      <h4>PagedAttention (vLLM, SOSP 2023)</h4>
+      <p>Borrow OS virtual memory: split the KV cache into fixed blocks, give each request a block table mapping logical to physical. Cuts wasted KV memory from 60–80% to under 4%, gives <strong>2–4× throughput</strong> over FasterTransformer/Orca at the same latency. Hardware implication: attention kernels must do gather-scatter from a block table.</p>
+    </div>
+    <div class="diagram-panel accent-border">
+      <h4>KV quantisation</h4>
+      <p>FP8 (E4M3 / E5M2) KV halves memory at near-FP16 accuracy. <strong>NVFP4 KV</strong> halves it again — &lt;1% accuracy loss on MMLU-PRO, MBPP, LiveCodeBench, Ruler 64K (NVIDIA blog, 2025). LMDeploy ships per-head per-token asymmetric INT4/INT8.</p>
+    </div>
+  </div>
+
+  <h3>What this design does instead</h3>
+  <p>For MAX_SEQ_LEN = 128, D_MODEL = 64, Q8.8: the entire KV cache is <strong>4 KB</strong>. It fits in two BRAMs. There is no HBM, no PagedAttention, no quantisation pressure — the problem doesn't exist at this scale. What survives is the <em>interface</em>: append-on-token, broadcast-on-attention. That interface is the same on this Artix-7 design and on a 1 000 000 000 000-parameter model running on 16 H100s.</p>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 22: Q8.8 vs FP8 vs FP4 -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s22">
+  <div class="slide-number">22</div>
+  <h2>Q8.8 vs INT8 vs FP8 vs FP4 — when fixed-point wins</h2>
+
+  <div class="table-wrap"><table>
+    <tr><th>Format</th><th>Bits</th><th>Range</th><th>LSB / Granularity</th><th>Mul cost</th><th>Range/Precision split</th></tr>
+    <tr><td><strong>Q8.8</strong> (this repo)</td><td>16</td><td>±128</td><td>2⁻⁸ ≈ 4·10⁻³</td><td>1 DSP48</td><td>Static — fixed point</td></tr>
+    <tr><td>INT8 + per-tensor scale</td><td>8 + 16-bit scale</td><td>scale-dependent</td><td>scale·2⁻⁷</td><td>~½ DSP</td><td>Static per tensor</td></tr>
+    <tr><td>INT8 + per-channel scale</td><td>8 + 16-bit/ch</td><td>per-channel</td><td>per-channel</td><td>~½ DSP + scale mul</td><td>Per-output-channel — used by SmoothQuant, AWQ</td></tr>
+    <tr><td>FP8 E4M3 (Hopper fwd)</td><td>8</td><td>±448</td><td>2⁻⁹ near 1.0</td><td>~⅓ DSP eq.</td><td>Per-element float</td></tr>
+    <tr><td>FP8 E5M2 (Hopper grad)</td><td>8</td><td>±57 344</td><td>2⁻⁵ near 1.0</td><td>~⅓ DSP eq.</td><td>Bigger range, less precision</td></tr>
+    <tr><td>NVFP4 / MXFP4 (Blackwell)</td><td>4 + shared E4M3 scale per 16</td><td>±6 per element</td><td>~½ near 1.0</td><td>tiny mul + shared scale fan-out</td><td>Block-scaled — best of both</td></tr>
+  </table></div>
+
+  <h3>What this matters for</h3>
+  <ul>
+    <li><strong>Small-D inference (D_MODEL ≤ 256)</strong>: Q8.8 and INT8 are roughly equivalent in accuracy and are the cheapest in hardware. Q8.8's edge is transparency; INT8's edge is tooling (TFLite, ONNX Runtime, llama.cpp Q4_K).</li>
+    <li><strong>Mid-D inference (D_MODEL 512–1024)</strong>: per-channel INT8 is the production sweet spot. Per-tensor formats start to fail because of activation outliers in attention.</li>
+    <li><strong>Large-D inference (D_MODEL ≥ 2048, GPT-3+)</strong>: FP8 with per-tile scaling. The Hopper Transformer Engine exists for this regime.</li>
+    <li><strong>Frontier training (LLaMA-3, GPT-4 successors)</strong>: NVFP4 / MXFP4 with stochastic rounding. Block-scaled formats handle outliers without per-tile FP32 loss-scaling.</li>
+  </ul>
+
+  <h3>The area / energy curve</h3>
+  <p>Multiplier area is roughly quadratic in mantissa width. So:</p>
+  <ul>
+    <li>FP32 → BF16: ~4× smaller multiplier (Google's 2018 BF16 paper, "free" for inference, near-free for training).</li>
+    <li>BF16 → FP8: another 4×, but only via Transformer Engine + per-tile scaling. Not free.</li>
+    <li>FP8 → FP4: another 4×, but only via MXFP/NVFP4 + stochastic rounding. Active research as of 2024–2026.</li>
+    <li>Below FP4: papers, no shipping silicon.</li>
+  </ul>
+
+  <p>The curve eventually meets a wall: at FP4, multiplier energy is so low (~0.03 pJ at 4 nm) that <em>operand movement</em> dominates the budget. That's the regime block scaling exists for — share one E4M3 scale across 16 elements, broadcast it once, save 15× on scale-fetch energy.</p>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 23: FPGA history -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s23">
+  <div class="slide-number">23</div>
+  <h2>Transformer-on-FPGA — the genealogy</h2>
+
+  <div class="table-wrap"><table>
+    <tr><th>Year</th><th>Project</th><th>What it did</th><th>Headline number</th></tr>
+    <tr><td>2017</td><td>MS Project Brainwave</td><td>FPGA "soft NPU" on Stratix 10, MS-FP8</td><td>39.5 TFLOPS, sub-ms latency</td></tr>
+    <tr><td>2020</td><td><strong>FTRANS</strong> (Li et al., ISLPED)</td><td>Block-circulant weight compression for BERT/RoBERTa</td><td>16× model-size reduction · 27× perf vs CPU · 8.8× energy improvement vs GPU</td></tr>
+    <tr><td>2021</td><td><strong>EdgeBERT</strong> (Tambe et al., MICRO)</td><td>Entropy-based early exit, sentence-granularity DVFS, FP quantisation; 12 nm ASIC</td><td>53× energy savings vs Jetson TX2</td></tr>
+    <tr><td>2021</td><td><strong>FQ-BERT</strong> (Liu et al., DATE)</td><td>Fully integer/fixed-point BERT — softmax and LayerNorm in the integer domain, all intermediates fixed-point</td><td>28.91× perf-per-watt vs CPU/GPU, &lt; 1% accuracy loss on SST-2</td></tr>
+    <tr><td>2022</td><td><strong>ViTA</strong> (Nag, Datta et al.)</td><td>Vision-transformer accelerator on Zynq ZC7020</td><td>~90% utilisation @ 0.88 W, 150 MHz</td></tr>
+    <tr><td>2022</td><td>FlashAttention (algorithm)</td><td>Tile-and-fuse Q·Kᵀ + softmax + scores·V into a single SRAM-sized kernel</td><td>2–4× speedup, no approximation</td></tr>
+    <tr><td>2023–2024</td><td>ALSAP, DOTA, FAMOUS, FNM-Trans</td><td>Sparse attention, N:M sparsity, length-adaptive pipelining; UltraScale+ targets</td><td>—</td></tr>
+  </table></div>
+
+  <h3>The fixed-point lineage</h3>
+  <p>This repo's core algorithmic moves all trace back to the FQ-BERT line: <strong>integer softmax</strong> (PWL exp), <strong>integer LayerNorm</strong> (RSqrt LUT + Newton–Raphson), <strong>integer attention scoring</strong>, <strong>integer FFN</strong>. The FQ-BERT paper showed that you can run BERT entirely in the integer domain with &lt; 1% accuracy loss — this design implements the same idea at smaller scale and with simpler approximations.</p>
+
+  <h3>Why FPGAs are still relevant in the 2026 landscape</h3>
+  <ul>
+    <li><strong>Latency.</strong> Single-batch software-scheduled FPGAs eliminate the warm-up tail and runtime variability of batched GPU servers.</li>
+    <li><strong>Cost-per-inference at low utilisation.</strong> A $2 k Artix-7 board running 24/7 at 100% beats a $30 k H100 running at 5% — the regime most enterprise inference actually lives in.</li>
+    <li><strong>On-prem and air-gapped deployment.</strong> Data-sovereignty pressure (legal, defence, medical) pushes inference back behind the firewall; FPGAs are easier to procure, audit, and certify than cutting-edge ASICs.</li>
+    <li><strong>Educational.</strong> 1 500 lines of SystemVerilog you can read end-to-end. That's what this repo is.</li>
+  </ul>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 24: Where this design fits -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s24">
+  <div class="slide-number">24</div>
+  <h2>Where this design fits</h2>
+
+  <div class="table-wrap"><table>
+    <tr><th>Property</th><th><strong>This repo</strong></th><th>FTRANS (2020)</th><th>FQ-BERT (2021)</th><th>ViTA (2022)</th><th>H100 (2022)</th></tr>
+    <tr><td>Target</td><td>Artix-7 xc7a35t</td><td>VCU118</td><td>VCU118</td><td>Zynq ZC7020</td><td>4 nm GPU</td></tr>
+    <tr><td>Clock</td><td>29.2–229.9 MHz (mod-dep.)</td><td>~200 MHz</td><td>~200 MHz</td><td>150 MHz</td><td>1.78 GHz</td></tr>
+    <tr><td>Numeric</td><td>Q8.8 fixed-point</td><td>Block-circulant 16-bit</td><td>Mixed integer/FXP</td><td>INT8</td><td>FP8 + per-layer scale</td></tr>
+    <tr><td>D_MODEL</td><td>64</td><td>768 (BERT-base)</td><td>768</td><td>768</td><td>any (compiler tiles)</td></tr>
+    <tr><td>Compute</td><td>4×4 systolic + FSM softmax/LN</td><td>Multiple SAs + dedicated softmax/LN</td><td>Reconfigurable, INT softmax/LN</td><td>Single dense engine</td><td>132 SMs × Tensor Cores + SFUs</td></tr>
+    <tr><td>KV-cache</td><td>Dual-port BRAM, append-on-token</td><td>—</td><td>—</td><td>—</td><td>HBM3, PagedAttention via vLLM</td></tr>
+    <tr><td>Verification</td><td>Python golden + iverilog + CocoTB, 84 tests</td><td>Per-paper</td><td>Per-paper</td><td>Per-paper</td><td>Internal QA + CUDA test stack</td></tr>
+    <tr><td>Lines of RTL</td><td>~1 500</td><td>large</td><td>large</td><td>large</td><td>(unpublished)</td></tr>
+  </table></div>
+
+  <h3>Honest scope statement</h3>
+  <p>This is not a competitive transformer accelerator. It will not run LLaMA-7B; the systolic array is two orders of magnitude too small, the KV-cache is six orders of magnitude too small, the clock is one order of magnitude too slow. It is an <strong>educational reference implementation</strong> with three stated goals:</p>
+  <ol>
+    <li>Make every architectural primitive of a transformer decoder small enough to read in one screen of code.</li>
+    <li>Show, by construction, that softmax + LayerNorm + KV-cache + GEMM compose into one autoregressive step.</li>
+    <li>Provide a regression-tested baseline for changing one variable at a time — RMSNorm, GQA, FlashAttention-style fusion, INT8 with per-channel scales, an 8×8 array — without rewriting the others.</li>
+  </ol>
+
+  <p>If you're reading the RTL because you're learning hardware design, that's the audience. If you're reading it because you want to deploy a transformer to an FPGA, look at FQ-BERT or ViTA instead and bring the patterns from this repo to your own scale.</p>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 25: Interactive cycle counter -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s25">
+  <div class="slide-number">25</div>
+  <h2>Interactive — decoder cycle counter</h2>
+  <p>Choose a configuration; see the per-token cycle budget for one decoder layer at the chosen sequence position. Numbers come from the FSM cycle counts in the actual modules.</p>
+
+  <div class="control-panel">
+    <div class="control-row">
+      <label>D_MODEL</label>
+      <input id="ctlD" type="range" min="32" max="512" step="32" value="64"/>
+      <span class="val" id="ctlDv">64</span>
+    </div>
+    <div class="control-row">
+      <label>N_HEADS</label>
+      <input id="ctlH" type="range" min="1" max="16" step="1" value="4"/>
+      <span class="val" id="ctlHv">4</span>
+    </div>
+    <div class="control-row">
+      <label>D_FF / D_MODEL ratio</label>
+      <input id="ctlR" type="range" min="2" max="8" step="1" value="4"/>
+      <span class="val" id="ctlRv">4</span>
+    </div>
+    <div class="control-row">
+      <label>seq_pos</label>
+      <input id="ctlS" type="range" min="0" max="128" step="1" value="64"/>
+      <span class="val" id="ctlSv">64</span>
+    </div>
+    <div class="control-row">
+      <label>Clock (MHz)</label>
+      <input id="ctlF" type="range" min="10" max="200" step="1" value="29"/>
+      <span class="val" id="ctlFv">29</span>
+    </div>
+    <div class="metric-grid">
+      <div class="metric"><div class="metric-label">LayerNorm</div><div class="metric-value" id="cycLN">—</div></div>
+      <div class="metric"><div class="metric-label">QKV proj</div><div class="metric-value" id="cycQKV">—</div></div>
+      <div class="metric"><div class="metric-label">Score+Softmax+WS</div><div class="metric-value" id="cycATT">—</div></div>
+      <div class="metric"><div class="metric-label">FFN</div><div class="metric-value" id="cycFFN">—</div></div>
+      <div class="metric"><div class="metric-label">Total cycles / token</div><div class="metric-value" id="cycTOT">—</div></div>
+      <div class="metric"><div class="metric-label">Latency (ms)</div><div class="metric-value" id="cycLAT">—</div></div>
+      <div class="metric"><div class="metric-label">Throughput (tok/s)</div><div class="metric-value" id="cycTPS">—</div></div>
+      <div class="metric"><div class="metric-label">FFN as % of total</div><div class="metric-value" id="cycFFNpct">—</div></div>
+    </div>
+  </div>
+
+  <p>Notice how FFN's share of the budget climbs as D_MODEL grows (because FFN is O(D²) while the rest is O(D · seq)) and how seq_pos has almost zero effect on per-token cost at small D — the KV-cache is doing exactly the work it's there to do.</p>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 26: Q8.8 explorer -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s26">
+  <div class="slide-number">26</div>
+  <h2>Interactive — Q8.8 fixed-point explorer</h2>
+  <p>Type a value; see how Q8.8 stores it, the rounding error, and the worst-case error across the format's range. Compare with FP8 E4M3 (Hopper forward), FP8 E5M2 (Hopper backward), and FP4 E2M1 (Blackwell).</p>
+
+  <div class="control-panel">
+    <div class="pill-row" id="fmtPills2">
+      <span class="pill active" data-fmt="q88">Q8.8 (this repo)</span>
+      <span class="pill" data-fmt="int8">INT8</span>
+      <span class="pill" data-fmt="bf16">BF16</span>
+      <span class="pill" data-fmt="fp8e4m3">FP8 E4M3</span>
+      <span class="pill" data-fmt="fp8e5m2">FP8 E5M2</span>
+      <span class="pill" data-fmt="fp4">FP4 E2M1</span>
+    </div>
+    <div class="control-row">
+      <label>Value</label>
+      <input id="fmtVal2" type="number" step="any" value="1.234"/>
+    </div>
+    <div class="metric-grid">
+      <div class="metric"><div class="metric-label">Stored bits</div><div class="metric-value" id="fmtBits2">—</div></div>
+      <div class="metric"><div class="metric-label">Decoded value</div><div class="metric-value" id="fmtRecon2">—</div></div>
+      <div class="metric"><div class="metric-label">Abs error</div><div class="metric-value" id="fmtErr2">—</div></div>
+      <div class="metric"><div class="metric-label">Range</div><div class="metric-value" id="fmtRange2">—</div></div>
+    </div>
+  </div>
+
+  <p>Try <code>0.5898</code> in Q8.8 — that's the actual <code>out_emb[0]</code> from the integration test (<code>0x0097</code>). Try <code>1e-4</code> in FP4 (rounds to zero) versus Q8.8 (also zero — Q8.8 is no better at small numbers than FP4 is). Try <code>200</code> in Q8.8 (saturates) versus FP8 E4M3 (representable). The format choices are full of these quiet trade-offs.</p>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<!-- SLIDE 27: Limitations -->
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<section class="slide" id="s27">
+  <div class="slide-number">27</div>
+  <h2>Limitations &amp; what would change at the next scale</h2>
+
+  <h3>What this design <em>doesn't</em> do</h3>
+  <ul>
+    <li><strong>No RoPE.</strong> Position is implicit in <code>seq_pos</code>; LLaMA-class models rotate Q and K. Easy to add: one new FSM state, two element-wise multiplies per head per element.</li>
+    <li><strong>No GQA / MQA.</strong> Every head has its own K, V. Modern inference designs (LLaMA-2-70B+, Mistral) share K, V across multiple Q heads, cutting KV memory by 4–8×.</li>
+    <li><strong>No FlashAttention-style fusion.</strong> The S×S score matrix is fully materialised before softmax. For MAX_SEQ_LEN = 128 this is fine; at long context, tile-and-fuse is mandatory.</li>
+    <li><strong>No SwiGLU.</strong> ReLU is one sign-bit test; SwiGLU is three GEMMs and a sigmoid. Any FP-domain non-linearity can be swapped in at S_RELU; SwiGLU also needs a third weight matrix.</li>
+    <li><strong>RMSNorm</strong> is a 30-line refactor of <code>layer_norm.sv</code> (drop S_MEAN, drop the centered array, keep <code>fp_inv_sqrt</code>).</li>
+    <li><strong>No multi-layer top-level.</strong> One decoder block; stacking is documented but not synthesised.</li>
+    <li><strong>No AXI bus.</strong> Weights are loaded by simulation testbenches, not by a host bus master. AXI-Lite for control + AXI4 for weight DMA is the obvious productisation path.</li>
+  </ul>
+
+  <h3>What the next scale-up would touch</h3>
+  <ul>
+    <li><strong>Pipelined Newton–Raphson</strong> — splits the LayerNorm and softmax critical paths across two FSM states, restoring ≥ 100 MHz on Artix-7. Documented as the highest-priority follow-up in the README.</li>
+    <li><strong>BRAM-mapped weights with double buffering</strong> — lets the next layer's weights load while the current layer computes. Hides weight-fetch latency.</li>
+    <li><strong>Per-channel INT8</strong> — same systolic array, scale registers next to each weight column. Halves activation memory at &lt; 1% accuracy loss.</li>
+    <li><strong>8×8 PE array</strong> — fits comfortably in xc7a35t's DSP budget (16 → 64 of 90).</li>
+  </ul>
+
+  <h3>The point of all of this</h3>
+  <p>None of those changes are mysterious. They're all in the literature, in shipping silicon, or in the companion <a href="https://github.com/BrendanJamesLynskey/AI_MMUL_Unit">AI_MMUL_Unit</a> repo. The reference design is small enough to make each change a self-contained patch, with the regression suite catching anything that drifts. That's the role of educational RTL — not to replace H100, but to make H100's architectural choices legible.</p>
+
+  <div class="callout">
+    <div class="callout-label">Closing</div>
+    <p>From Kung's 1978 PE to the Blackwell Ultra SFU, the primitive doesn't change — the surroundings do. This repo is the smallest place where you can see the whole loop close: a 16-bit MAC, a piecewise-linear exp, a Newton–Raphson reciprocal square root, a KV-cache, and an FSM that schedules them so a token comes out the other end.</p>
+  </div>
+</section>
+
+<!-- ────────────────────────────────────────────────────────────────────── -->
+<footer class="footer">
+  <p><a href="https://github.com/BrendanJamesLynskey/LLM_Transformer_Decoder_RTL">github.com/BrendanJamesLynskey/LLM_Transformer_Decoder_RTL</a> — RTL · Python golden model · SV &amp; CocoTB testbenches · technical report</p>
+  <p>Companion repo: <a href="https://github.com/BrendanJamesLynskey/AI_MMUL_Unit">AI_MMUL_Unit</a> — the same systolic-array primitives in isolation.</p>
+  <p>Cited specs verified against: Vaswani et al. NeurIPS 2017 · Xiong et al. ICML 2020 · Dao et al. NeurIPS 2022 / arXiv:2407.08608 (FA-3) · Kwon et al. SOSP 2023 (vLLM) · Ham et al. HPCA 2020 (A³) · Wang et al. HPCA 2021 (SpAtten) · Liu et al. DATE 2021 (FQ-BERT) · Li et al. ISLPED 2020 (FTRANS) · Tambe et al. MICRO 2021 (EdgeBERT) · NVIDIA Hopper / Blackwell whitepapers · Google TPU v1–v6 papers · OCP MX v1.0 · Microsoft Project Brainwave Hot Chips 2017.</p>
+</footer>
+
+<script>
+// ---------- Slide 25: per-token cycle counter ----------
+function recompute25() {
+  const D     = +document.getElementById('ctlD').value;
+  const H     = +document.getElementById('ctlH').value;
+  const ratio = +document.getElementById('ctlR').value;
+  const S     = +document.getElementById('ctlS').value;
+  const F     = +document.getElementById('ctlF').value;
+  const D_FF  = D * ratio;
+  const dHead = Math.max(1, Math.floor(D / H));
+
+  document.getElementById('ctlDv').textContent = D;
+  document.getElementById('ctlHv').textContent = H;
+  document.getElementById('ctlRv').textContent = ratio;
+  document.getElementById('ctlSv').textContent = S;
+  document.getElementById('ctlFv').textContent = F;
+
+  // Per-FSM cycle estimates (calibrated to D=64, H=4, S=64 → matches in-design budget on slide 12)
+  const cycLN  = 3 * D + 50;                        // mean + variance + normalize + invsqrt
+  const cycQKV = 3 * D;                             // 3 projections, one element/cycle here
+  const cycSc  = H * Math.max(1, S) * dHead;        // scores
+  const cycSm  = H * (5 * 128 + 30);                // shared softmax FSM, ~5 cycles/elem
+  const cycWs  = H * dHead * Math.max(1, S);        // weighted sum
+  const cycOp  = D * D;                             // output projection
+  const cycATT = cycSc + cycSm + cycWs + cycOp;
+  const cycFF1 = D * D_FF;
+  const cycFF2 = D_FF * D;
+  const cycFFN = cycFF1 + cycFF2 + 16;              // + ReLU pulse
+
+  const total = 2 * cycLN + cycQKV + cycATT + cycFFN + 20;
+  const latencyMs = (total / (F * 1e6)) * 1000;
+  const tps = 1000.0 / latencyMs;
+
+  document.getElementById('cycLN').textContent     = (2 * cycLN).toLocaleString();
+  document.getElementById('cycQKV').textContent    = cycQKV.toLocaleString();
+  document.getElementById('cycATT').textContent    = cycATT.toLocaleString();
+  document.getElementById('cycFFN').textContent    = cycFFN.toLocaleString();
+  document.getElementById('cycTOT').textContent    = total.toLocaleString();
+  document.getElementById('cycLAT').textContent    = latencyMs.toFixed(2);
+  document.getElementById('cycTPS').textContent    = tps.toFixed(0);
+  document.getElementById('cycFFNpct').textContent = (cycFFN / total * 100).toFixed(1) + '%';
+}
+['ctlD','ctlH','ctlR','ctlS','ctlF'].forEach(id => {
+  document.getElementById(id).addEventListener('input', recompute25);
+});
+recompute25();
+
+// ---------- Slide 26: number-format explorer ----------
+function fp32_bits(x) {
+  const buf = new ArrayBuffer(4);
+  new Float32Array(buf)[0] = x;
+  return new Uint32Array(buf)[0];
+}
+function bits_fp32(b) {
+  const buf = new ArrayBuffer(4);
+  new Uint32Array(buf)[0] = b >>> 0;
+  return new Float32Array(buf)[0];
+}
+function quantQ88(x) {
+  // Round to nearest, saturate at the rails
+  let raw = Math.round(x * 256);
+  if (raw >  32767) raw =  32767;
+  if (raw < -32768) raw = -32768;
+  const bits = raw & 0xFFFF;
+  const value = raw / 256;
+  return { bits, value, nbits: 16 };
+}
+function quantINT8(x) {
+  let v = Math.max(-128, Math.min(127, Math.round(x)));
+  return { bits: v & 0xFF, value: v, nbits: 8 };
+}
+function quantBF16(x) {
+  const b = fp32_bits(x);
+  const bias = 0x7FFF + ((b >>> 16) & 1);
+  const truncated = (b + bias) >>> 16;
+  return { bits: truncated & 0xFFFF, value: bits_fp32(truncated << 16), nbits: 16 };
+}
+function quantFP8(x, eb, mb) {
+  if (x === 0) return { bits: 0, value: 0, nbits: 8 };
+  const sign = x < 0 ? 1 : 0;
+  let ax = Math.abs(x);
+  const bias = (1 << (eb - 1)) - 1;
+  const eMax = (1 << eb) - 1;
+  let e = Math.floor(Math.log2(ax));
+  let biased = e + bias;
+  let mInt;
+  if (biased >= eMax) {
+    biased = eMax - 1; mInt = (1 << mb) - 1;
+  } else if (biased < 1) {
+    biased = 0; mInt = 0;
+  } else {
+    const mant = ax / Math.pow(2, e) - 1.0;
+    mInt = Math.round(mant * (1 << mb));
+    if (mInt >= (1 << mb)) { mInt = 0; biased += 1; if (biased >= eMax) { biased = eMax - 1; mInt = (1 << mb) - 1; } }
+  }
+  const bits = (sign << 7) | (biased << mb) | mInt;
+  let v;
+  if (biased === 0) v = (sign?-1:1) * mInt * Math.pow(2, 1 - bias - mb);
+  else v = (sign?-1:1) * (1 + mInt/(1<<mb)) * Math.pow(2, biased - bias);
+  return { bits, value: v, nbits: 8 };
+}
+function quantFP4(x) {
+  if (x === 0) return { bits: 0, value: 0, nbits: 4 };
+  const sign = x < 0 ? 1 : 0;
+  let ax = Math.abs(x);
+  let e = Math.floor(Math.log2(ax));
+  let biased = e + 1;
+  let mInt;
+  if (biased >= 3) { biased = 3; mInt = 1; }
+  else if (biased < 1) { biased = 0; mInt = ax >= 0.5 ? 1 : 0; }
+  else { mInt = (ax / Math.pow(2, e) - 1.0) >= 0.5 ? 1 : 0; }
+  const bits = (sign << 3) | (biased << 1) | mInt;
+  let v;
+  if (biased === 0) v = (sign?-1:1) * mInt * 0.5;
+  else v = (sign?-1:1) * (1 + mInt*0.5) * Math.pow(2, biased - 1);
+  return { bits, value: v, nbits: 4 };
+}
+
+const FMT_RANGE2 = {
+  q88: '±127.996 (Q8.8)',
+  int8: '−128 … +127',
+  bf16: '±3.4e38 (BF16)',
+  fp8e4m3: '±448',
+  fp8e5m2: '±57344',
+  fp4: '±6 (E2M1)'
+};
+function activeFmt2() {
+  const a = document.querySelector('#fmtPills2 .pill.active');
+  return a ? a.dataset.fmt : 'q88';
+}
+function recomputeFmt2() {
+  const fmt = activeFmt2();
+  const x = parseFloat(document.getElementById('fmtVal2').value);
+  let r;
+  if (isNaN(x)) {
+    document.getElementById('fmtBits2').textContent = '—';
+    document.getElementById('fmtRecon2').textContent = '—';
+    document.getElementById('fmtErr2').textContent = '—';
+    document.getElementById('fmtRange2').textContent = FMT_RANGE2[fmt];
+    return;
+  }
+  if (fmt === 'q88')      r = quantQ88(x);
+  else if (fmt === 'int8') r = quantINT8(x);
+  else if (fmt === 'bf16') r = quantBF16(x);
+  else if (fmt === 'fp8e4m3') r = quantFP8(x, 4, 3);
+  else if (fmt === 'fp8e5m2') r = quantFP8(x, 5, 2);
+  else if (fmt === 'fp4')  r = quantFP4(x);
+  document.getElementById('fmtBits2').textContent =
+    '0x' + r.bits.toString(16).padStart(Math.ceil(r.nbits/4),'0').toUpperCase();
+  document.getElementById('fmtRecon2').textContent =
+    (typeof r.value === 'number' && isFinite(r.value)) ? r.value.toPrecision(6) : String(r.value);
+  document.getElementById('fmtErr2').textContent =
+    (typeof r.value === 'number' && isFinite(r.value)) ? Math.abs(x - r.value).toPrecision(3) : '—';
+  document.getElementById('fmtRange2').textContent = FMT_RANGE2[fmt];
+}
+document.querySelectorAll('#fmtPills2 .pill').forEach(p => {
+  p.addEventListener('click', () => {
+    document.querySelectorAll('#fmtPills2 .pill').forEach(q => q.classList.remove('active'));
+    p.classList.add('active');
+    recomputeFmt2();
+  });
+});
+document.getElementById('fmtVal2').addEventListener('input', recomputeFmt2);
+recomputeFmt2();
+</script>
+
+</body>
+</html>

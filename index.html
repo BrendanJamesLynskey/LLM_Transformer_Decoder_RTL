@@ -6,7 +6,7 @@
     <title>LLM Transformer Decoder RTL — Hardware Deep Dive</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;700&family=Space+Grotesk:wght@400;500;600;700&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Saira+Semi+Condensed:wght@400;500;600;700&family=Archivo:ital,wght@0,300;0,400;0,500;0,600;0,700;1,400;1,700&family=Share+Tech+Mono:wght@400&display=swap" rel="stylesheet">
     <style>
         :root {
             --bg-primary: #10294a;
@@ -23,9 +23,9 @@
             --red: #f86d53;
             --amber: #f3bf41;
             --border: #294f79;
-            --font-display: 'Space Grotesk', sans-serif;
-            --font-mono: 'JetBrains Mono', 'Fira Code', monospace;
-            --font-body: 'Inter', sans-serif;
+            --font-display: 'Saira Semi Condensed', sans-serif;
+            --font-mono: 'Share Tech Mono', 'Share Tech Mono', monospace;
+            --font-body: 'Archivo', sans-serif;
             --max-width: 920px;
         }
         *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -191,6 +191,7 @@
             .ascii-art { font-size: 0.65rem; }
         }
     </style>
+<style>:root{font-synthesis-weight:none}</style>
 </head>
 <body>
 
@@ -458,7 +459,7 @@
           <path d="M0,0 L0,6 L5,3 z" fill="#a7e5fe"/>
         </marker>
       </defs>
-      <g font-family="JetBrains Mono" font-size="11" fill="#eff4f8">
+      <g font-family="Share Tech Mono" font-size="11" fill="#eff4f8">
         <text x="20" y="60" fill="#a5dcfe">A[0,*]→</text>
         <text x="20" y="120" fill="#a5dcfe">A[1,*]→</text>
         <text x="20" y="180" fill="#a5dcfe">A[2,*]→</text>
@@ -479,7 +480,7 @@
         <rect x="100" y="220" width="80" height="50" rx="4"/><rect x="220" y="220" width="80" height="50" rx="4"/>
         <rect x="340" y="220" width="80" height="50" rx="4"/><rect x="460" y="220" width="80" height="50" rx="4"/>
       </g>
-      <g font-family="JetBrains Mono" font-size="10" fill="#a7e5fe" text-anchor="middle">
+      <g font-family="Share Tech Mono" font-size="10" fill="#a7e5fe" text-anchor="middle">
         <text x="140" y="70">PE 0,0</text><text x="260" y="70">PE 0,1</text><text x="380" y="70">PE 0,2</text><text x="500" y="70">PE 0,3</text>
         <text x="140" y="130">PE 1,0</text><text x="260" y="130">PE 1,1</text><text x="380" y="130">PE 1,2</text><text x="500" y="130">PE 1,3</text>
         <text x="140" y="190">PE 2,0</text><text x="260" y="190">PE 2,1</text><text x="380" y="190">PE 2,2</text><text x="500" y="190">PE 2,3</text>
